@@ -143,7 +143,8 @@ final class UpdateManager {
         scheduler.interval = nextFetchInterval
         scheduler.tolerance = min(nextFetchInterval / 2, 60 * 30)
         scheduler.qualityOfService = .utility
-        scheduler.schedule { completion in
+        // 两层闭包均弱引用管理器，避免调度器持有回调期间形成循环引用。
+        scheduler.schedule { [weak self] completion in
             Task { @MainActor [weak self] in
                 guard let self = self else {
                     completion(.finished)

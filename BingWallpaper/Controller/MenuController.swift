@@ -24,6 +24,8 @@ final class MenuController: NSObject {
     private static let REFRESH_IMAGES_TAG = 9
     private static let FAVORITES_TAG = 11
     private static let ACTIVE_DISPLAY_TAG = 12
+    /// 主菜单预览和说明区域的宽度，单位为 pt，避免长显示器名称撑宽菜单。
+    private static let MENU_CONTENT_WIDTH: CGFloat = 340
     private lazy var settingsWc = SettingsWc.instance()
     
     // MARK: - UI setup
@@ -44,11 +46,17 @@ final class MenuController: NSObject {
         updateStatusMenu()
     }
     
+    /// 创建菜单栏入口，复用应用图标并保留彩色显示，缩放到菜单栏适用尺寸。
     private func createStatusBarItem() -> NSStatusItem {
         let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         
         if let button = statusItem.button {
-            button.image = NSImage(systemSymbolName: "photo", accessibilityDescription: "BingWallpaper")
+            // 复制后调整尺寸，避免影响应用图标在其他位置的显示。
+            let image = NSImage(named: NSImage.applicationIconName)?.copy() as? NSImage
+            image?.size = NSSize(width: 18, height: 18)
+            image?.isTemplate = false
+            image?.accessibilityDescription = "BingWallpaper"
+            button.image = image
         }
         
         return statusItem
@@ -57,10 +65,10 @@ final class MenuController: NSObject {
     private func createMenu() -> NSMenu {
         let menu = NSMenu()
         menu.delegate = self
-        menu.minimumWidth = 300
+        menu.minimumWidth = MenuController.MENU_CONTENT_WIDTH
         
         let imageItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
-        imageSelectorView = ImageSelectorView(frame: CGRect(x: 0, y: 0, width: menu.size.width, height: imageSelectorViewHeight(menu: menu)))
+        imageSelectorView = ImageSelectorView(frame: CGRect(x: 0, y: 0, width: MenuController.MENU_CONTENT_WIDTH, height: imageSelectorViewHeight()))
         imageSelectorView.leftButton.action = #selector(MenuController.imageSelectorViewLeftButtonAction)
         imageSelectorView.leftButton.target = self
         imageSelectorView.rightButton.action = #selector(MenuController.imageSelectorViewRightButtonAction)
@@ -273,11 +281,12 @@ final class MenuController: NSObject {
     
     // MARK: - Helper
     
-    private func imageSelectorViewHeight(menu: NSMenu) -> CGFloat {
+    /// 根据预览区域宽度计算高度，与 XIB 中的 16:9 图片约束保持一致。
+    private func imageSelectorViewHeight() -> CGFloat {
         let outerPadding = 5.0
         let buttonWidth = 15.0
         let innerPadding = 5.0
-        let imageViewWidth = menu.size.width - outerPadding*2 - buttonWidth*2 - innerPadding*2
+        let imageViewWidth = MenuController.MENU_CONTENT_WIDTH - outerPadding*2 - buttonWidth*2 - innerPadding*2
         let topMargin = 4.0
         return imageViewWidth / 16*9 + topMargin
     }
@@ -333,10 +342,18 @@ final class MenuController: NSObject {
         let textItemIndex = menu.index(of: imageItem) + 1
         if let descriptor {
             let info = descriptor.imageInfo
-            let textItem = NSMenuItem(title: info.title, action: nil, keyEquivalent: "")
+            // 标题由自定义视图显示，避免 NSMenu 按完整标题的单行长度撑宽菜单。
+            let textItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
             textItem.tag = MenuController.TEXT_VIEW_TAG
 
-            let textView = TextView(frame: CGRect(x: 0, y: 0, width: menu.size.width, height: 0))
+            let textView = TextView(frame: CGRect(x: 0, y: 0, width: MenuController.MENU_CONTENT_WIDTH, height: 76))
+            // 将长标题限制为两行，版权限制为一行，完整内容仍可在详情中查看。
+            textView.descriptionLabel.maximumNumberOfLines = 2
+            textView.descriptionLabel.lineBreakMode = .byWordWrapping
+            textView.descriptionLabel.preferredMaxLayoutWidth = MenuController.MENU_CONTENT_WIDTH - 50
+            textView.copyrightLabel.maximumNumberOfLines = 1
+            textView.copyrightLabel.lineBreakMode = .byTruncatingTail
+            textView.copyrightLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
             textView.descriptionLabel.stringValue = info.title
             textView.copyrightLabel.stringValue = info.copyright
             textView.button.action = nil
@@ -635,8 +652,10 @@ final class MenuController: NSObject {
             let title = WallpaperManager.displayInfo(
                 for: activeDisplayIdentifier
             )?.title ?? "Current Display"
-            displayItem.title = "Display: \(title)"
-            displayItem.toolTip = "Wallpaper changes from this menu apply only to this display."
+            // 菜单保留简短名称，完整型号及分辨率通过悬停提示查看。
+            let compactTitle = title.count > 30 ? String(title.prefix(27)) + "…" : title
+            displayItem.title = "Display: \(compactTitle)"
+            displayItem.toolTip = "\(title)\nWallpaper changes from this menu apply only to this display."
         }
     }
 }

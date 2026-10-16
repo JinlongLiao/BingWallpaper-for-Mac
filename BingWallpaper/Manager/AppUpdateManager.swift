@@ -34,7 +34,8 @@ class AppUpdateManager {
         }
     }
 
-    private static let defaultReleaseRepository = "ader47/BingWallpaper-for-Mac"
+    /// 未配置有效仓库时，从原版项目的 GitHub Releases 检查更新。
+    private static let defaultReleaseRepository = "2h4u/BingWallpaper-for-Mac"
 
     private struct GitHubRelease: Decodable {
         let tagName: String
