@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 import ImageIO
 import OSLog
 
@@ -43,6 +44,39 @@ private final class WallpaperFileValidationCache: @unchecked Sendable {
 
 class FileHandler {
     private static let validationCache = WallpaperFileValidationCache()
+
+    /// 主线程使用的内容摘要缓存；文件修改时间或大小变化后重新计算。
+    @MainActor
+    private static var wallpaperContentDigests: [URL: (Date, Int, String)] = [:]
+
+    /// 返回文件内容标识供菜单去重；读取失败时保留原条目，不影响壁纸浏览。
+    /// 摘要按文件属性缓存，避免每次打开菜单重新读取全部图片。
+    @MainActor
+    static func wallpaperContentDigest(at url: URL) -> String? {
+        do {
+            return try withWallpaperDirectoryAccess { _ in
+                // URL 会缓存 resourceValues；每次创建新 URL，才能发现原路径的文件已被替换。
+                let currentURL = URL(fileURLWithPath: url.path)
+                let values = try currentURL.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
+                if let modifiedAt = values.contentModificationDate,
+                   let size = values.fileSize,
+                   let cached = wallpaperContentDigests[url],
+                   cached.0 == modifiedAt, cached.1 == size {
+                    return cached.2
+                }
+                let data = try Data(contentsOf: url, options: .mappedIfSafe)
+                let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+                if let modifiedAt = values.contentModificationDate, let size = values.fileSize {
+                    wallpaperContentDigests[url] = (modifiedAt, size, digest)
+                }
+                return digest
+            }
+        } catch {
+            wallpaperContentDigests.removeValue(forKey: url)
+            logger.error("Failed to read wallpaper content digest at \(url.path, privacy: .public): \(String(reflecting: error), privacy: .public)")
+            return nil
+        }
+    }
 
     static func usersPictureDirectory() -> String {
         guard let picturesDirectory = NSSearchPathForDirectoriesInDomains(.picturesDirectory, .userDomainMask, true).first else {

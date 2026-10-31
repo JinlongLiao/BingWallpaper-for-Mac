@@ -115,10 +115,12 @@ public final class ImageDescriptor: NSManagedObject {
         return Image(descriptor: self)
     }()
 
+    /// 使用必应归档日展示日期。东亚地区的 startdate 是前一天的 UTC 日期，
+    /// enddate 对应当天归档日；startDate 仍用于原有排序、文件名及收藏标识。
     var imageInfo: WallpaperImageInfo {
         return WallpaperImageInfo(
             description: descriptionString,
-            startDate: startDate,
+            startDate: endDate,
             marketCode: marketCode
         )
     }
@@ -129,6 +131,38 @@ public final class ImageDescriptor: NSManagedObject {
             marketCode: marketCode,
             imageURL: imageUrl
         )
+    }
+
+    /// 对菜单候选按实际文件内容去重，不改变数据库、收藏或磁盘文件。
+    /// 输入应按时间升序排列；同图默认保留较新的条目，已选中的条目优先。
+    /// 读取失败的条目独立保留，避免单个文件异常使其他壁纸消失。
+    @MainActor
+    static func distinctWallpaperDescriptors(
+        from descriptors: [ImageDescriptor],
+        preferredWallpaperID: String? = nil,
+        contentDigest: @MainActor (ImageDescriptor) -> String? = {
+            FileHandler.wallpaperContentDigest(at: $0.image.downloadPath)
+        }
+    ) -> [ImageDescriptor] {
+        var indexByDigest = [String: Int]()
+        var retainedIndices = Set<Int>()
+        for (index, descriptor) in descriptors.enumerated() {
+            guard let digest = contentDigest(descriptor) else {
+                retainedIndices.insert(index)
+                continue
+            }
+            if let previousIndex = indexByDigest[digest] {
+                if descriptors[previousIndex].wallpaperIdentifier == preferredWallpaperID {
+                    continue
+                }
+                retainedIndices.remove(previousIndex)
+            }
+            indexByDigest[digest] = index
+            retainedIndices.insert(index)
+        }
+        return descriptors.enumerated().compactMap { index, descriptor in
+            retainedIndices.contains(index) ? descriptor : nil
+        }
     }
 
     static func wallpaperIdentifier(

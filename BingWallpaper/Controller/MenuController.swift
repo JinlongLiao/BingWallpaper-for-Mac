@@ -46,15 +46,15 @@ final class MenuController: NSObject {
         updateStatusMenu()
     }
     
-    /// 创建菜单栏入口，复用应用图标并保留彩色显示，缩放到菜单栏适用尺寸。
+    /// 创建菜单栏入口，使用独立的单色山水模板，由系统适配明暗及选中状态。
     private func createStatusBarItem() -> NSStatusItem {
         let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         
         if let button = statusItem.button {
-            // 复制后调整尺寸，避免影响应用图标在其他位置的显示。
-            let image = NSImage(named: NSImage.applicationIconName)?.copy() as? NSImage
+            // 菜单栏使用矢量符号，避免完整应用图标缩小后丢失细节。
+            let image = NSImage(named: "StatusBarIcon")?.copy() as? NSImage
             image?.size = NSSize(width: 18, height: 18)
-            image?.isTemplate = false
+            image?.isTemplate = true
             image?.accessibilityDescription = "BingWallpaper"
             button.image = image
         }
@@ -230,8 +230,11 @@ final class MenuController: NSObject {
             return
         }
 
-        descriptors = Database.instance.allImageDescriptors(marketCode: descriptor.marketCode)
-            .filter { $0.image.isOnDisk() }
+        descriptors = ImageDescriptor.distinctWallpaperDescriptors(
+            from: Database.instance.allImageDescriptors(marketCode: descriptor.marketCode)
+                .filter { $0.image.isOnDisk() },
+            preferredWallpaperID: wallpaperID
+        )
         guard let index = descriptors.firstIndex(where: { $0.wallpaperIdentifier == wallpaperID }) else {
             return
         }
@@ -568,8 +571,10 @@ final class MenuController: NSObject {
         let pinnedWallpaperIsUnavailable = settings.pinnedWallpaperID != nil
             && pinnedDescriptor == nil
         let visibleMarketCode = pinnedDescriptor?.marketCode ?? settings.bingMarketCode
-        self.descriptors = downloadedDescriptors
-            .filter { $0.marketCode == visibleMarketCode }
+        self.descriptors = ImageDescriptor.distinctWallpaperDescriptors(
+            from: downloadedDescriptors.filter { $0.marketCode == visibleMarketCode },
+            preferredWallpaperID: pinnedDescriptor?.wallpaperIdentifier
+        )
         guard descriptors.isEmpty == false else {
             selectedDescriptorIndex = 0
             imageSelectorView?.imageView.image = nil
@@ -639,9 +644,10 @@ final class MenuController: NSObject {
             downloadedDescriptors.first { $0.wallpaperIdentifier == wallpaperID }
         }
         let visibleMarketCode = displayedDescriptor?.marketCode ?? effectiveMarketCode
-        descriptors = downloadedDescriptors.filter {
-            $0.marketCode == visibleMarketCode
-        }
+        descriptors = ImageDescriptor.distinctWallpaperDescriptors(
+            from: downloadedDescriptors.filter { $0.marketCode == visibleMarketCode },
+            preferredWallpaperID: displayedDescriptor?.wallpaperIdentifier
+        )
         selectedDescriptorIndex = displayedDescriptor.flatMap { displayed in
             descriptors.firstIndex {
                 $0.wallpaperIdentifier == displayed.wallpaperIdentifier

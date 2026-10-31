@@ -221,6 +221,97 @@ final class ImageDirectorySettingsTests: XCTestCase {
 
 @MainActor
 final class DatabaseTests: XCTestCase {
+    /// 自动地区的不同语言编号指向相同内容时，只保留最近一次看到的版本。
+    func testDuplicateRegionalWallpapersKeepLatestVersion() throws {
+        let database = Database(inMemory: true)
+        let update = try database.updateImageDescriptors(from: [
+            makeEntry(startDate: "20261030", imageURL: "/th?id=OHR.Church_ZH-CN123_UHD.jpg"),
+            makeEntry(startDate: "20261030", imageURL: "/th?id=OHR.Church_JA-JP456_UHD.jpg")
+        ], marketCode: nil)
+        let descriptors = update.descriptors
+        XCTAssertEqual(descriptors.count, 2)
+
+        let distinct = ImageDescriptor.distinctWallpaperDescriptors(from: descriptors) { _ in
+            "same-file-content"
+        }
+
+        XCTAssertEqual(distinct.map(\.wallpaperIdentifier), [descriptors[1].wallpaperIdentifier])
+        XCTAssertEqual(database.allImageDescriptors().count, 2)
+    }
+
+    /// 去重后仍能定位固定或收藏中选中的版本，文件不可读的条目不被误删。
+    func testDuplicateWallpapersPreserveSelectedVersionAndUnreadableEntries() throws {
+        let database = Database(inMemory: true)
+        let update = try database.updateImageDescriptors(from: [
+            makeEntry(startDate: "20261028"),
+            makeEntry(startDate: "20261029"),
+            makeEntry(startDate: "20261030")
+        ], marketCode: "zh-CN")
+        let descriptors = update.descriptors
+        let selectedID = descriptors[0].wallpaperIdentifier
+        let distinct = ImageDescriptor.distinctWallpaperDescriptors(
+            from: descriptors,
+            preferredWallpaperID: selectedID
+        ) { descriptor in
+            descriptor.startDate == "20261030" ? nil : "same-content"
+        }
+
+        XCTAssertEqual(distinct.map(\.wallpaperIdentifier), [selectedID, descriptors[2].wallpaperIdentifier])
+    }
+
+    /// 不同图片即使标题相同也不合并，保持原有浏览顺序。
+    func testDifferentWallpaperContentsRemainVisibleInOrder() throws {
+        let database = Database(inMemory: true)
+        let update = try database.updateImageDescriptors(from: [
+            makeEntry(startDate: "20261029"),
+            makeEntry(startDate: "20261030")
+        ], marketCode: "zh-CN")
+        let distinct = ImageDescriptor.distinctWallpaperDescriptors(from: update.descriptors) {
+            $0.startDate
+        }
+        XCTAssertEqual(distinct.map(\.startDate), ["20261029", "20261030"])
+    }
+
+    /// 摘要按真实字节计算，并在原路径被新内容覆盖后失效。
+    func testWallpaperContentDigestTracksFileReplacement() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("BingWallpaperDigestTests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let first = directory.appendingPathComponent("zh-CN.jpg")
+        let second = directory.appendingPathComponent("ja-JP.jpg")
+        try Data("same-image".utf8).write(to: first)
+        try Data("same-image".utf8).write(to: second)
+        let digest = try XCTUnwrap(FileHandler.wallpaperContentDigest(at: first))
+        XCTAssertEqual(FileHandler.wallpaperContentDigest(at: second), digest)
+        try Data("different-image-content".utf8).write(to: first, options: .atomic)
+        XCTAssertNotEqual(FileHandler.wallpaperContentDigest(at: first), digest)
+        XCTAssertEqual(FileHandler.wallpaperContentDigest(at: second), digest)
+    }
+
+    /// 展示日期采用归档日，避免 UTC 起始日期使东亚当天壁纸显示为前一天。
+    func testWallpaperInfoUsesArchiveDayWithoutChangingIdentity() throws {
+        let database = Database(inMemory: true)
+        let entry = DownloadManager.ImageEntry(
+            url: "/th?id=OHR.FrankfurtHalloween_ZH-CN5998782698_1920x1080.jpg",
+            enddate: "20261031",
+            startdate: "20261030",
+            copyright: "Frankfurt (© Example)",
+            copyrightlink: "https://www.bing.com/search?q=Frankfurt"
+        )
+        let update = try database.updateImageDescriptors(from: [entry], marketCode: "zh-CN")
+        let descriptor = try XCTUnwrap(update.descriptors.first)
+        let expected = WallpaperImageInfo(
+            description: entry.copyright,
+            startDate: entry.enddate,
+            marketCode: "zh-CN"
+        )
+
+        XCTAssertEqual(descriptor.imageInfo.date, expected.date)
+        XCTAssertEqual(descriptor.startDate, "20261030")
+        XCTAssertEqual(descriptor.wallpaperIdentifier, "zh-CN:20261030")
+    }
+
     func testRejectsUpdateWhenEveryMetadataEntryIsInvalid() {
         let database = Database(inMemory: true)
         let invalidEntry = makeEntry(startDate: "../../invalid")
