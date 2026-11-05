@@ -66,9 +66,15 @@ final class WallpaperManager {
         updateWallpaperIfNeeded(forceRefresh: false)
     }
 
+    /// 设置单屏壁纸；显式固定才持久保留图片，普通浏览在下次更新时继续跟随最新。
+    /// - Parameters:
+    ///   - descriptor: 已下载的壁纸。
+    ///   - displayIdentifier: 目标屏幕的稳定标识。
+    ///   - pinWallpaper: 是否由用户显式要求固定，默认为 true。
     func setWallpaper(
         descriptor: ImageDescriptor,
-        forDisplayIdentifier displayIdentifier: String
+        forDisplayIdentifier displayIdentifier: String,
+        pinWallpaper: Bool = true
     ) {
         var profiles = settings.wallpaperDisplayProfiles
         var profile = profiles[displayIdentifier] ?? WallpaperDisplayProfile()
@@ -79,11 +85,22 @@ final class WallpaperManager {
             profile.marketMode = .automatic
             profile.marketCode = nil
         }
-        profile.pinMode = .pinned
-        profile.pinnedWallpaperID = descriptor.wallpaperIdentifier
+        profile.pinMode = pinWallpaper ? .pinned : .followLatest
+        profile.pinnedWallpaperID = pinWallpaper ? descriptor.wallpaperIdentifier : nil
         profiles[displayIdentifier] = profile
         settings.wallpaperDisplayProfiles = profiles
         applyWallpaper(descriptor, toDisplayIdentifier: displayIdentifier)
+    }
+
+    /// 手动共享浏览覆盖所有在线屏幕的旧选择，不改动自动更新的屏幕范围配置。
+    /// - Parameter descriptor: 同时应用到在线屏幕的已下载壁纸，下次更新后继续跟随最新。
+    func browseWallpaperOnAllDisplays(descriptor: ImageDescriptor) {
+        let identifiers = Set(Self.connectedDisplays().map { $0.identifier })
+        settings.restoreSharedWallpaperSelection(forDisplayIdentifiers: identifiers)
+        imageDescriptor = descriptor
+        for identifier in identifiers {
+            applyWallpaper(descriptor, toDisplayIdentifier: identifier)
+        }
     }
 
     func followLatestWallpaper(forDisplayIdentifier displayIdentifier: String) {

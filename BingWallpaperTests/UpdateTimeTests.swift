@@ -796,6 +796,41 @@ final class FavoriteWallpaperSettingsTests: XCTestCase {
 }
 
 final class WallpaperDisplayProfileTests: XCTestCase {
+    /// 切换范围默认选择全部屏幕，用户改为当前屏幕后应持久保存。
+    func testWallpaperSwitchingScopeDefaultsToAllAndPersistsCurrentDisplayChoice() {
+        let suiteName = "BingWallpaperTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let settings = Settings(defaults: defaults)
+        XCTAssertTrue(settings.switchesAllDisplaysTogether)
+        settings.switchesAllDisplaysTogether = false
+        XCTAssertFalse(Settings(defaults: defaults).switchesAllDisplaysTogether)
+    }
+
+    /// 所有屏幕一起浏览后解除在线屏幕的固定和地区覆盖，离线屏幕配置保持不变。
+    func testSharedBrowsingRestoresConnectedDisplaysToGlobalWallpaper() {
+        withSettings { settings in
+            let oldProfile = WallpaperDisplayProfile(
+                marketMode: .automatic,
+                pinMode: .pinned,
+                pinnedWallpaperID: "automatic:20261102"
+            )
+            settings.pinnedWallpaperID = "zh-CN:20261101"
+            settings.wallpaperDisplayProfiles = [
+                "built-in": oldProfile,
+                "external": oldProfile,
+                "disconnected": oldProfile
+            ]
+
+            settings.restoreSharedWallpaperSelection(forDisplayIdentifiers: ["built-in", "external"])
+
+            XCTAssertNil(settings.pinnedWallpaperID)
+            XCTAssertNil(settings.wallpaperDisplayProfiles["built-in"])
+            XCTAssertNil(settings.wallpaperDisplayProfiles["external"])
+            XCTAssertEqual(settings.wallpaperDisplayProfiles["disconnected"], oldProfile)
+        }
+    }
+
     func testProfilesPersistAndDefaultProfilesAreDiscarded() {
         withSettings { settings in
             settings.wallpaperDisplayProfiles = [

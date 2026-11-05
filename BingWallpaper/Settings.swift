@@ -227,6 +227,19 @@ public class Settings {
         }
     }
 
+    /// 手动浏览是否同时切换所有已连接屏幕；默认开启，与自动更新范围独立保存。
+    var switchesAllDisplaysTogether: Bool {
+        get { defaults.object(forKey: Settings.SWITCHES_ALL_DISPLAYS_TOGETHER) as? Bool ?? true }
+        set { defaults.set(newValue, forKey: Settings.SWITCHES_ALL_DISPLAYS_TOGETHER) }
+    }
+
+    /// 共享浏览时解除在线屏幕的独立地区及固定状态，离线屏幕配置保留。
+    /// - Parameter identifiers: 本次参与共享浏览的已连接屏幕标识。
+    func restoreSharedWallpaperSelection(forDisplayIdentifiers identifiers: Set<String>) {
+        pinnedWallpaperID = nil
+        wallpaperDisplayProfiles = wallpaperDisplayProfiles.filter { !identifiers.contains($0.key) }
+    }
+
     var wallpaperDisplayMode: WallpaperDisplayMode {
         get {
             guard let rawValue = defaults.string(forKey: Settings.WALLPAPER_DISPLAY_MODE),
@@ -380,6 +393,8 @@ public class Settings {
     private static let IMAGE_DOWNLOAD_PATH = "IMAGE_DOWNLOAD_PATH"
     private static let IMAGE_DOWNLOAD_PATH_BOOKMARK = "IMAGE_DOWNLOAD_PATH_BOOKMARK"
     private static let BING_MARKET_CODE = "BING_MARKET_CODE"
+    /// 手动浏览切换范围的持久化键，缺省时切换所有在线屏幕。
+    private static let SWITCHES_ALL_DISPLAYS_TOGETHER = "SWITCHES_ALL_DISPLAYS_TOGETHER"
     private static let WALLPAPER_DISPLAY_MODE = "WALLPAPER_DISPLAY_MODE"
     private static let SELECTED_WALLPAPER_DISPLAY_IDS = "SELECTED_WALLPAPER_DISPLAY_IDS"
     private static let FAVORITE_WALLPAPER_IDS = "FAVORITE_WALLPAPER_IDS"

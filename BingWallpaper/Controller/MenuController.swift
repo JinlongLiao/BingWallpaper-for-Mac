@@ -24,6 +24,8 @@ final class MenuController: NSObject {
     private static let REFRESH_IMAGES_TAG = 9
     private static let FAVORITES_TAG = 11
     private static let ACTIVE_DISPLAY_TAG = 12
+    /// 多屏手动切换范围入口的菜单标识。
+    private static let SWITCHING_SCOPE_TAG = 13
     /// 主菜单预览和说明区域的宽度，单位为 pt，避免长显示器名称撑宽菜单。
     private static let MENU_CONTENT_WIDTH: CGFloat = 340
     private lazy var settingsWc = SettingsWc.instance()
@@ -94,6 +96,10 @@ final class MenuController: NSObject {
         )
         activeDisplayItem.isEnabled = false
         menu.addItem(activeDisplayItem)
+
+        let switchingScopeItem = NSMenuItem(title: "切换范围", action: nil, keyEquivalent: "")
+        switchingScopeItem.tag = MenuController.SWITCHING_SCOPE_TAG
+        menu.addItem(switchingScopeItem)
 
         let updateStatusItem = NSMenuItem(title: "Update Status", action: nil, keyEquivalent: "")
         updateStatusItem.tag = MenuController.UPDATE_STATUS_TAG
@@ -239,17 +245,7 @@ final class MenuController: NSObject {
             return
         }
         selectedDescriptorIndex = index
-        if let activeDisplayIdentifier {
-            WallpaperManager.shared.setWallpaper(
-                descriptor: descriptor,
-                forDisplayIdentifier: activeDisplayIdentifier
-            )
-        } else {
-            if settings.pinnedWallpaperID != nil {
-                settings.pinnedWallpaperID = wallpaperID
-            }
-            WallpaperManager.shared.setWallpaper(descriptor: descriptor)
-        }
+        updateSelectedImage(newSelectedDescriptorIndex: index)
         updateImageSelectorView(newSelectedDescriptorIndex: index)
     }
 
@@ -294,20 +290,44 @@ final class MenuController: NSObject {
         return imageViewWidth / 16*9 + topMargin
     }
     
+    /// 浏览或选择收藏时按用户选择更新所有屏幕或当前屏幕，避免隐式固定旧壁纸。
     @MainActor
     private func updateSelectedImage(newSelectedDescriptorIndex: Int) {
-        if let descriptor = descriptors[safe: newSelectedDescriptorIndex] {
-            if let activeDisplayIdentifier {
-                WallpaperManager.shared.setWallpaper(
-                    descriptor: descriptor,
-                    forDisplayIdentifier: activeDisplayIdentifier
-                )
-            } else if settings.pinnedWallpaperID == nil {
-                WallpaperManager.shared.setWallpaper(descriptor: descriptor)
-            }
+        guard let descriptor = descriptors[safe: newSelectedDescriptorIndex] else { return }
+        if settings.switchesAllDisplaysTogether {
+            WallpaperManager.shared.browseWallpaperOnAllDisplays(descriptor: descriptor)
+        } else if let activeDisplayIdentifier {
+            WallpaperManager.shared.setWallpaper(
+                descriptor: descriptor,
+                forDisplayIdentifier: activeDisplayIdentifier,
+                pinWallpaper: false
+            )
         }
     }
-    
+
+    /// 多屏时展示明确的切换范围和当前选项，单屏时隐藏该入口。
+    private func updateWallpaperSwitchingScopeMenu() {
+        guard let item = menu?.item(withTag: Self.SWITCHING_SCOPE_TAG) else { return }
+        item.isHidden = WallpaperManager.connectedDisplays().count < 2
+        let scopeMenu = NSMenu(title: "切换范围")
+        for (title, allDisplays) in [("所有屏幕一起切换", true), ("仅当前屏幕", false)] {
+            let option = NSMenuItem(title: title, action: #selector(selectWallpaperSwitchingScope(_:)), keyEquivalent: "")
+            option.target = self
+            option.representedObject = allDisplays
+            option.state = settings.switchesAllDisplaysTogether == allDisplays ? .on : .off
+            scopeMenu.addItem(option)
+        }
+        item.title = settings.switchesAllDisplaysTogether ? "切换范围：所有屏幕" : "切换范围：仅当前屏幕"
+        item.submenu = scopeMenu
+    }
+
+    /// 记住手动切换范围；更改范围本身不立即替换壁纸。
+    @objc private func selectWallpaperSwitchingScope(_ sender: NSMenuItem) {
+        guard let allDisplays = sender.representedObject as? Bool else { return }
+        settings.switchesAllDisplaysTogether = allDisplays
+        updateWallpaperSwitchingScopeMenu()
+    }
+
     @MainActor
     private func updateImageSelectorView(newSelectedDescriptorIndex: Int) {
         guard let menu = menu else { return }
@@ -661,7 +681,7 @@ final class MenuController: NSObject {
             // 菜单保留简短名称，完整型号及分辨率通过悬停提示查看。
             let compactTitle = title.count > 30 ? String(title.prefix(27)) + "…" : title
             displayItem.title = "Display: \(compactTitle)"
-            displayItem.toolTip = "\(title)\nWallpaper changes from this menu apply only to this display."
+            displayItem.toolTip = "\(title)\nUse the switching scope menu to choose all displays or this display."
         }
     }
 }
@@ -670,11 +690,11 @@ final class MenuController: NSObject {
 
 extension MenuController: UpdateManagerDelegate {
     func wallpaperLibraryDidChange(forceWallpaperRefresh: Bool) {
+        // 即使菜单打开也先更新全局最新图片，避免只刷新预览而漏掉桌面更新。
+        showNewestImage()
         if let activeDisplayIdentifier {
             showWallpaper(forMenuDisplayIdentifier: activeDisplayIdentifier)
             updateImageSelectorView(newSelectedDescriptorIndex: selectedDescriptorIndex)
-        } else {
-            showNewestImage()
         }
         if forceWallpaperRefresh {
             WallpaperManager.shared.refreshWallpaper(force: true)
@@ -689,6 +709,7 @@ extension MenuController: UpdateManagerDelegate {
 extension MenuController: NSMenuDelegate {
     func menuNeedsUpdate(_ menu: NSMenu) {
         showWallpaperForMenuDisplay()
+        updateWallpaperSwitchingScopeMenu()
         updateImageSelectorView(newSelectedDescriptorIndex: selectedDescriptorIndex)
         updateStatusMenu()
         updateFavoriteMenus()
