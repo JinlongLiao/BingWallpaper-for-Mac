@@ -27,9 +27,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let recoveryNotice = Database.instance.recoveryNotice {
             let alert = NSAlert()
             alert.alertStyle = .warning
-            alert.messageText = "Wallpaper Database Recovered"
+            alert.messageText = L("Wallpaper Database Recovered")
             alert.informativeText = recoveryNotice
-            alert.addButton(withTitle: "OK")
+            alert.addButton(withTitle: L("OK"))
             alert.runModal()
         }
 

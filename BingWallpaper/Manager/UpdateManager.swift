@@ -22,9 +22,9 @@ enum WallpaperUpdateFailureStage: Equatable {
     var title: String {
         switch self {
         case .metadata:
-            return "Wallpaper list"
+            return L("Wallpaper list")
         case .images:
-            return "Image download"
+            return L("Image download")
         }
     }
 }
@@ -46,13 +46,13 @@ struct WallpaperUpdateStatus: Equatable {
     var menuTitle: String {
         switch phase {
         case .idle, .succeeded:
-            return "Update Status: Up to Date"
+            return L("Update Status: Up to Date")
         case .updating:
-            return "Update Status: Updating…"
+            return L("Update Status: Updating…")
         case .retrying:
-            return "Update Status: Failed — Retry Scheduled"
+            return L("Update Status: Failed — Retry Scheduled")
         case .failed:
-            return "Update Status: Failed"
+            return L("Update Status: Failed")
         }
     }
 }
@@ -75,10 +75,14 @@ final class UpdateManager {
     private var consecutiveFailures = 0
     private var isUpdating = false
     private var pendingUpdateRequested = false
+    private var rotationTimer: Timer?
+    private var isRotating = false
     private(set) var status: WallpaperUpdateStatus
 
     nonisolated private static let RETRY_BASE_INTERVAL: TimeInterval = 30
     nonisolated private static let RETRY_MAX_INTERVAL: TimeInterval = 30 * 60
+    /// 更新进行中时，自动更换稍后再试的间隔。
+    nonisolated private static let ROTATION_BUSY_RETRY_INTERVAL: TimeInterval = 15
 
     init(settings: Settings = Settings()) {
         self.settings = settings
@@ -97,9 +101,123 @@ final class UpdateManager {
     @MainActor
     func start() {
         setupObserver()
+        scheduleWallpaperAlchemyRotation()
         Task { [weak self] in
             await self?.doUpdateOrScheduleActivity()
         }
+    }
+
+    // MARK: - Wallpaper Alchemy 定时更换
+
+    /// 更换间隔变化后重新计时；从关闭改为开启时立即换一张，让设置马上生效。
+    /// - Parameter previousInterval: 修改前的间隔。
+    func wallpaperAlchemyRefreshIntervalDidChange(from previousInterval: WallpaperAlchemyRefreshInterval) {
+        let interval = settings.wallpaperAlchemyRefreshInterval
+        if previousInterval == .never, interval != .never {
+            // 从当天每日轮换所在的位置接着往下换，避免跳回排行第一张。
+            let rotationPage = DownloadManager.wallpaperAlchemyRotationPage(
+                day: DownloadManager.wallpaperAlchemyRotationDay()
+            )
+            settings.wallpaperAlchemyRotationPosition = (rotationPage - 1) * DownloadManager.wallpaperAlchemyPageSize
+            rotateWallpaperAlchemy()
+            return
+        }
+        scheduleWallpaperAlchemyRotation()
+    }
+
+    /// 按上次更换时间安排下一次更换；关闭时停止计时。
+    /// - Parameter delay: 指定的等待时间，nil 时按设置的间隔计算。
+    private func scheduleWallpaperAlchemyRotation(after delay: TimeInterval? = nil) {
+        rotationTimer?.invalidate()
+        rotationTimer = nil
+        guard let interval = settings.wallpaperAlchemyRefreshInterval.timeInterval else { return }
+
+        let fireInterval: TimeInterval
+        if let delay {
+            fireInterval = delay
+        } else if let lastRotation = settings.lastWallpaperAlchemyRotation,
+                  lastRotation <= Date() {
+            fireInterval = max(0, interval - Date().timeIntervalSince(lastRotation))
+        } else {
+            settings.lastWallpaperAlchemyRotation = Date()
+            fireInterval = interval
+        }
+
+        let timer = Timer(timeInterval: fireInterval, repeats: false) { _ in
+            Task { @MainActor [weak self] in
+                self?.rotateWallpaperAlchemy()
+            }
+        }
+        timer.tolerance = min(max(1, fireInterval * 0.1), 60)
+        // 菜单打开时运行循环处于事件跟踪模式，加入 common 模式才能按时触发。
+        RunLoop.main.add(timer, forMode: .common)
+        rotationTimer = timer
+    }
+
+    /// 换成所选分类下载排行中的下一张壁纸，只请求一张图片。
+    private func rotateWallpaperAlchemy() {
+        guard settings.wallpaperAlchemyRefreshInterval != .never else {
+            scheduleWallpaperAlchemyRotation()
+            return
+        }
+        // 没有任何显示器使用 Wallpaper Alchemy 时不请求网络，只继续计时。
+        guard settings.requiredChannelCodes.contains(WallpaperChannel.wallpaperAlchemyCode) else {
+            settings.lastWallpaperAlchemyRotation = Date()
+            scheduleWallpaperAlchemyRotation()
+            return
+        }
+        guard isUpdating == false, isRotating == false else {
+            scheduleWallpaperAlchemyRotation(after: Self.ROTATION_BUSY_RETRY_INTERVAL)
+            return
+        }
+
+        isRotating = true
+        rotationTimer?.invalidate()
+        rotationTimer = nil
+        let locale = settings.wallpaperAlchemyLocale
+        let categoryID = settings.wallpaperAlchemyCategory?.id
+        let nextPosition = settings.wallpaperAlchemyRotationPosition + 1
+        logger.info("Changing Wallpaper Alchemy wallpaper to ranking position \(nextPosition, privacy: .public)")
+
+        Task { [weak self] in
+            do {
+                let result = try await DownloadManager.downloadWallpaperAlchemyEntry(
+                    at: nextPosition,
+                    locale: locale,
+                    categoryID: categoryID
+                )
+                // 请求期间换了分类或语言时丢弃结果，由随之触发的更新显示新分类。
+                guard let self,
+                      self.settings.wallpaperAlchemyCategory?.id == categoryID,
+                      self.settings.wallpaperAlchemyLocale == locale else {
+                    self?.finishWallpaperAlchemyRotation()
+                    return
+                }
+                self.settings.wallpaperAlchemyRotationPosition = result.position
+                let descriptorUpdate = try Database.instance.updateWallpaperAlchemyImageDescriptors(
+                    from: [result.entry],
+                    locale: locale
+                )
+                for descriptor in descriptorUpdate.descriptors {
+                    let isOnDisk = await descriptor.image.isValidOnDisk()
+                    guard descriptor.requiresImageDownload || isOnDisk == false else { continue }
+                    try await descriptor.image.downloadAndSaveToDisk()
+                    try Database.instance.markImageDownloadCompleted(for: descriptor)
+                }
+                self.delegate?.wallpaperLibraryDidChange(forceWallpaperRefresh: false)
+                self.cleanup()
+            } catch {
+                logger.error("Failed to change the Wallpaper Alchemy wallpaper: \(error.localizedDescription, privacy: .public)")
+            }
+            self?.finishWallpaperAlchemyRotation()
+        }
+    }
+
+    private func finishWallpaperAlchemyRotation() {
+        isRotating = false
+        settings.lastWallpaperAlchemyRotation = Date()
+        scheduleWallpaperAlchemyRotation()
+        _ = beginPendingUpdateIfNeeded()
     }
 
     @MainActor
@@ -110,7 +228,7 @@ final class UpdateManager {
                 downloadedMarkets.insert(descriptor.marketCode)
             }
         }
-        let isMissingRequiredMarket = settings.requiredBingMarketCodes.contains {
+        let isMissingRequiredMarket = settings.requiredChannelCodes.contains {
             downloadedMarkets.contains($0) == false
         }
         if UpdateScheduleManager.isUpdateNecessary() || isMissingRequiredMarket {
@@ -176,7 +294,7 @@ final class UpdateManager {
         }
         let downloadedDescriptors = Database.instance.allImageDescriptors()
             .filter { $0.image.isOnDisk() }
-        for marketCode in settings.requiredBingMarketCodes {
+        for marketCode in settings.requiredChannelCodes {
             if let newestDescriptor = downloadedDescriptors
                 .filter({ $0.marketCode == marketCode })
                 .max() {
@@ -213,7 +331,7 @@ final class UpdateManager {
     
     @MainActor
     @objc func update() {
-        guard isUpdating == false else {
+        guard isUpdating == false, isRotating == false else {
             pendingUpdateRequested = true
             logger.info("An update is already running; queueing one follow-up update")
             return
@@ -232,36 +350,31 @@ final class UpdateManager {
             consecutiveFailures: consecutiveFailures
         ))
         logger.info("Updating")
-        let marketCodes = settings.requiredBingMarketCodes
+        let marketCodes = settings.requiredChannelCodes
+        let wallpaperAlchemyFeed = WallpaperAlchemyFeed(
+            locale: settings.wallpaperAlchemyLocale,
+            categoryID: settings.wallpaperAlchemyCategory?.id,
+            rotationPosition: settings.wallpaperAlchemyRefreshInterval == .never
+                ? nil
+                : settings.wallpaperAlchemyRotationPosition
+        )
 
         Task { [weak self] in
             var metadataFailure: Error?
             var imageFailureRequiringRetry: Error?
             var replacedExistingImage = false
+            // 第一张新图下载完就先换上壁纸，其余图片继续在后台下载。
+            var didPublishFirstImage = false
 
             for marketCode in marketCodes {
-                let imageEntries: [DownloadManager.ImageEntry]
-                do {
-                    imageEntries = try await DownloadManager.downloadImageEntries(
-                        numberOfImages: 8,
-                        marketCode: marketCode
-                    )
-                } catch {
-                    logger.error("Failed to download image entries for market \(marketCode ?? "automatic", privacy: .public) with error: \(error.localizedDescription, privacy: .public)")
-                    if metadataFailure == nil {
-                        metadataFailure = error
-                    }
-                    continue
-                }
-
                 let descriptorUpdate: Database.ImageDescriptorUpdate
                 do {
-                    descriptorUpdate = try Database.instance.updateImageDescriptors(
-                        from: imageEntries,
-                        marketCode: marketCode
+                    descriptorUpdate = try await Self.downloadAndStoreMetadata(
+                        forChannel: marketCode,
+                        wallpaperAlchemyFeed: wallpaperAlchemyFeed
                     )
                 } catch {
-                    logger.error("Failed to store wallpaper metadata for market \(marketCode ?? "automatic", privacy: .public): \(error.localizedDescription, privacy: .public)")
+                    logger.error("Failed to update wallpaper metadata for channel \(marketCode ?? "automatic", privacy: .public) with error: \(error.localizedDescription, privacy: .public)")
                     if metadataFailure == nil {
                         metadataFailure = error
                     }
@@ -290,6 +403,10 @@ final class UpdateManager {
                         try Database.instance.markImageDownloadCompleted(for: descriptor)
                         replacedExistingImage = replacedExistingImage || replacesExistingImage
                         marketHasAvailableImage = true
+                        if didPublishFirstImage == false {
+                            didPublishFirstImage = true
+                            self?.delegate?.wallpaperLibraryDidChange(forceWallpaperRefresh: false)
+                        }
                     } catch {
                         marketErrors.append(error)
                         logger.error("Failed to download and store image \(descriptor.imageUrl, privacy: .public) with error: \(error.localizedDescription, privacy: .public)")
@@ -350,6 +467,62 @@ final class UpdateManager {
                     consecutiveFailures: 0
                 ))
             }
+        }
+    }
+
+    /// Wallpaper Alchemy 列表的请求条件，在一次更新开始时从设置中读取。
+    private struct WallpaperAlchemyFeed {
+        let locale: String
+        let categoryID: Int?
+        /// 开启定时更换时为当前名次，只获取这一张；nil 表示按天轮换获取一整页。
+        let rotationPosition: Int?
+    }
+
+    /// 按频道下载最新壁纸列表并写入数据库。
+    /// - Parameters:
+    ///   - channelCode: 必应地区码（nil 为自动地区）或 Wallpaper Alchemy 保留码。
+    ///   - wallpaperAlchemyFeed: Wallpaper Alchemy 的语言与分类。
+    @MainActor
+    private static func downloadAndStoreMetadata(
+        forChannel channelCode: String?,
+        wallpaperAlchemyFeed: WallpaperAlchemyFeed
+    ) async throws -> Database.ImageDescriptorUpdate {
+        switch WallpaperChannel.source(for: channelCode) {
+        case .bing:
+            let imageEntries = try await DownloadManager.downloadImageEntries(
+                numberOfImages: 8,
+                marketCode: channelCode
+            )
+            return try Database.instance.updateImageDescriptors(
+                from: imageEntries,
+                marketCode: channelCode
+            )
+        case .wallpaperAlchemy:
+            let featuredAt = Date()
+            // 定时更换时保持当前这一张，避免每次常规更新都跳回当天那一页的第一张。
+            if let rotationPosition = wallpaperAlchemyFeed.rotationPosition {
+                let result = try await DownloadManager.downloadWallpaperAlchemyEntry(
+                    at: rotationPosition,
+                    locale: wallpaperAlchemyFeed.locale,
+                    categoryID: wallpaperAlchemyFeed.categoryID
+                )
+                return try Database.instance.updateWallpaperAlchemyImageDescriptors(
+                    from: [result.entry],
+                    locale: wallpaperAlchemyFeed.locale,
+                    featuredAt: featuredAt
+                )
+            }
+            let imageEntries = try await DownloadManager.downloadWallpaperAlchemyEntries(
+                numberOfImages: DownloadManager.wallpaperAlchemyPageSize,
+                locale: wallpaperAlchemyFeed.locale,
+                categoryID: wallpaperAlchemyFeed.categoryID,
+                rotationDay: DownloadManager.wallpaperAlchemyRotationDay(for: featuredAt)
+            )
+            return try Database.instance.updateWallpaperAlchemyImageDescriptors(
+                from: imageEntries,
+                locale: wallpaperAlchemyFeed.locale,
+                featuredAt: featuredAt
+            )
         }
     }
 
@@ -425,10 +598,16 @@ final class UpdateManager {
     @MainActor
     @objc func receiveSleepNote(note: NSNotification) {
         activity?.invalidate()
+        rotationTimer?.invalidate()
+        rotationTimer = nil
     }
 
     @MainActor
     @objc func receiveWakeNote(note: NSNotification) {
+        // 睡眠期间计时器不走，唤醒后按实际经过的时间重新计算。
+        if isRotating == false {
+            scheduleWallpaperAlchemyRotation()
+        }
         Task { [weak self] in
             await self?.doUpdateOrScheduleActivity()
         }

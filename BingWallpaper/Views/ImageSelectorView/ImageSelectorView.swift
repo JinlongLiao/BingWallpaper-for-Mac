@@ -44,7 +44,7 @@ class ImageSelectorView: NSView {
         imageHoverOverlay.frame = imageView.bounds
         imageHoverOverlay.autoresizingMask = [.layerWidthSizable, .layerHeightSizable]
         imageView.layer?.addSublayer(imageHoverOverlay)
-        imageView.toolTip = "Open image source on Bing"
+        imageView.toolTip = L("Open image source")
 
         let recognizer = NSClickGestureRecognizer(target: self, action: #selector(imageClicked(_:)))
         imageView.addGestureRecognizer(recognizer)

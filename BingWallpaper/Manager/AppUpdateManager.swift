@@ -200,10 +200,10 @@ class AppUpdateManager {
         let currentAppVersion = currentAppVersion.replacingOccurrences(of: "v", with: "")
         let latestAppVersion = latestAppVersion.replacingOccurrences(of: "v", with: "")
         let alert = NSAlert()
-        alert.messageText = "New version of BingWallpaper available"
-        alert.informativeText = "Do you want to update now?\nCurrent version: \(currentAppVersion)\nNew version: \(latestAppVersion)"
-        let updateButton = alert.addButton(withTitle: "Update")
-        alert.addButton(withTitle: "Later")
+        alert.messageText = L("New version of BingWallpaper available")
+        alert.informativeText = L("Do you want to update now?\nCurrent version: %@\nNew version: %@", currentAppVersion, latestAppVersion)
+        let updateButton = alert.addButton(withTitle: L("Update"))
+        alert.addButton(withTitle: L("Later"))
         alert.alertStyle = .informational
         
         alert.window.defaultButtonCell = updateButton.cell as? NSButtonCell
@@ -214,9 +214,9 @@ class AppUpdateManager {
     @MainActor
     private static func showAlreadyUpToDateDialog() {
         let alert = NSAlert()
-        alert.messageText = "BingWallpaper already up to date"
-        alert.informativeText = "There is no new version of BingWallpaper available"
-        let updateButton = alert.addButton(withTitle: "Ok")
+        alert.messageText = L("BingWallpaper already up to date")
+        alert.informativeText = L("There is no new version of BingWallpaper available")
+        let updateButton = alert.addButton(withTitle: L("Ok"))
         alert.alertStyle = .informational
         
         alert.window.defaultButtonCell = updateButton.cell as? NSButtonCell
@@ -228,9 +228,9 @@ class AppUpdateManager {
     private static func showUpdateFailureDialog(_ error: Swift.Error) {
         let alert = NSAlert()
         alert.alertStyle = .warning
-        alert.messageText = "Couldn’t Check for Updates"
+        alert.messageText = L("Couldn’t Check for Updates")
         alert.informativeText = error.localizedDescription
-        alert.addButton(withTitle: "OK")
+        alert.addButton(withTitle: L("OK"))
         alert.runModal()
     }
     

@@ -12,10 +12,9 @@ struct BingMarketOption: Equatable {
     let code: String?
     let title: String
 
-    static let automatic = BingMarketOption(
-        code: nil,
-        title: "Automatic (Network Location)"
-    )
+    static var automatic: BingMarketOption {
+        return BingMarketOption(code: nil, title: L("Automatic (Network Location)"))
+    }
 
     // Bing's documented `mkt` values. A market is a language and a
     // country/region, so a country can appear more than once.
@@ -32,13 +31,54 @@ struct BingMarketOption: Equatable {
     static var all: [BingMarketOption] {
         let localizedMarkets = supportedCodes
             .map { code in
-                let localizedName = Locale.current.localizedString(forIdentifier: code) ?? code
+                let localizedName = Localization.locale.localizedString(forIdentifier: code) ?? code
                 return BingMarketOption(code: code, title: "\(localizedName) (\(code))")
             }
             .sorted { (lhs: BingMarketOption, rhs: BingMarketOption) in
                 lhs.title.localizedStandardCompare(rhs.title) == .orderedAscending
             }
         return [automatic] + localizedMarkets
+    }
+}
+
+/// 壁纸图片来源，必应为默认来源。
+enum WallpaperSource: String, CaseIterable {
+    case bing
+    case wallpaperAlchemy
+
+    var title: String {
+        switch self {
+        case .bing:
+            return L("Microsoft Bing")
+        case .wallpaperAlchemy:
+            return "Wallpaper Alchemy"
+        }
+    }
+}
+
+/// 壁纸频道沿用数据库中的 marketCode 字段：nil 与必应地区码属于必应，
+/// 保留码属于 Wallpaper Alchemy。保留码不含连字符，不会与必应地区码冲突。
+enum WallpaperChannel {
+    static let wallpaperAlchemyCode = "wallpaperalchemy"
+
+    static func source(for channelCode: String?) -> WallpaperSource {
+        return channelCode == wallpaperAlchemyCode ? .wallpaperAlchemy : .bing
+    }
+
+    /// 判断频道码是否可用于显示器配置中的显式选择。
+    static func isSupported(_ channelCode: String) -> Bool {
+        return channelCode == wallpaperAlchemyCode
+            || BingMarketOption.supportedCodes.contains(channelCode)
+    }
+
+    /// 频道的展示名称：必应显示地区，Wallpaper Alchemy 显示来源名。
+    static func title(for channelCode: String?, locale: Locale = Localization.locale) -> String {
+        guard let channelCode else { return BingMarketOption.automatic.title }
+        if channelCode == wallpaperAlchemyCode {
+            return WallpaperSource.wallpaperAlchemy.title
+        }
+        let localizedName = locale.localizedString(forIdentifier: channelCode) ?? channelCode
+        return "\(localizedName) (\(channelCode))"
     }
 }
 
@@ -50,11 +90,43 @@ enum WallpaperDisplayMode: String, CaseIterable {
     var title: String {
         switch self {
         case .all:
-            return "All Displays"
+            return L("All Displays")
         case .main:
-            return "Main Display Only"
+            return L("Main Display Only")
         case .selected:
-            return "Selected Displays…"
+            return L("Selected Displays…")
+        }
+    }
+}
+
+/// Wallpaper Alchemy 自动更换壁纸的间隔，关闭时沿用每天轮换一页的方式。
+enum WallpaperAlchemyRefreshInterval: Int, CaseIterable {
+    case never = 0
+    case oneMinute = 60
+    case fiveMinutes = 300
+    case tenMinutes = 600
+    case oneHour = 3600
+    case twoHours = 7200
+
+    /// 更换间隔（秒），关闭时为 nil。
+    var timeInterval: TimeInterval? {
+        return rawValue > 0 ? TimeInterval(rawValue) : nil
+    }
+
+    var title: String {
+        switch self {
+        case .never:
+            return L("Off")
+        case .oneMinute:
+            return L("Every 1 Minute")
+        case .fiveMinutes:
+            return L("Every 5 Minutes")
+        case .tenMinutes:
+            return L("Every 10 Minutes")
+        case .oneHour:
+            return L("Every 1 Hour")
+        case .twoHours:
+            return L("Every 2 Hours")
         }
     }
 }
@@ -89,7 +161,7 @@ struct WallpaperDisplayProfile: Codable, Equatable {
             return nil
         case .explicit:
             guard let marketCode,
-                  BingMarketOption.supportedCodes.contains(marketCode) else {
+                  WallpaperChannel.isSupported(marketCode) else {
                 return globalMarketCode
             }
             return marketCode
@@ -227,10 +299,120 @@ public class Settings {
         }
     }
 
+    /// 全局壁纸来源，缺省或无法识别时使用必应。
+    var wallpaperSource: WallpaperSource {
+        get {
+            guard let rawValue = defaults.string(forKey: Settings.WALLPAPER_SOURCE),
+                  let source = WallpaperSource(rawValue: rawValue) else {
+                return .bing
+            }
+            return source
+        }
+        set {
+            defaults.set(newValue.rawValue, forKey: Settings.WALLPAPER_SOURCE)
+        }
+    }
+
+    /// 界面语言，默认跟随系统。
+    var appLanguage: AppLanguage {
+        get {
+            let rawValue = defaults.string(forKey: Localization.languageDefaultsKey) ?? ""
+            return AppLanguage(rawValue: rawValue) ?? .system
+        }
+        set {
+            defaults.set(newValue.rawValue, forKey: Localization.languageDefaultsKey)
+        }
+    }
+
+    /// Wallpaper Alchemy 的请求语言跟随界面语言。
+    var wallpaperAlchemyLocale: String {
+        return appLanguage.resolved().wallpaperAlchemyLocale
+    }
+
+    /// Wallpaper Alchemy 的分类筛选，nil 表示不限分类、使用全站下载排行。
+    var wallpaperAlchemyCategory: DownloadManager.WallpaperAlchemyCategory? {
+        get {
+            guard let data = defaults.data(forKey: Settings.WALLPAPER_ALCHEMY_CATEGORY),
+                  let category = try? JSONDecoder().decode(
+                    DownloadManager.WallpaperAlchemyCategory.self,
+                    from: data
+                  ),
+                  category.id > 0 else {
+                return nil
+            }
+            return category
+        }
+        set {
+            // 换了分类就从该分类下载排行的第一张重新轮换。
+            if newValue?.id != wallpaperAlchemyCategory?.id {
+                wallpaperAlchemyRotationPosition = 0
+            }
+            if let newValue, newValue.id > 0,
+               let data = try? JSONEncoder().encode(newValue) {
+                defaults.set(data, forKey: Settings.WALLPAPER_ALCHEMY_CATEGORY)
+            } else {
+                defaults.removeObject(forKey: Settings.WALLPAPER_ALCHEMY_CATEGORY)
+            }
+        }
+    }
+
+    /// Wallpaper Alchemy 自动更换壁纸的间隔，缺省为关闭。
+    var wallpaperAlchemyRefreshInterval: WallpaperAlchemyRefreshInterval {
+        get {
+            return WallpaperAlchemyRefreshInterval(
+                rawValue: defaults.integer(forKey: Settings.WALLPAPER_ALCHEMY_REFRESH_INTERVAL)
+            ) ?? .never
+        }
+        set {
+            defaults.set(newValue.rawValue, forKey: Settings.WALLPAPER_ALCHEMY_REFRESH_INTERVAL)
+        }
+    }
+
+    /// 自动更换时当前壁纸在下载排行中的名次，从 0 开始。
+    var wallpaperAlchemyRotationPosition: Int {
+        get {
+            return max(0, defaults.integer(forKey: Settings.WALLPAPER_ALCHEMY_ROTATION_POSITION))
+        }
+        set {
+            defaults.set(max(0, newValue), forKey: Settings.WALLPAPER_ALCHEMY_ROTATION_POSITION)
+        }
+    }
+
+    /// 上次自动更换壁纸的时间，重启应用后据此继续计时。
+    var lastWallpaperAlchemyRotation: Date? {
+        get {
+            return defaults.object(forKey: Settings.LAST_WALLPAPER_ALCHEMY_ROTATION) as? Date
+        }
+        set {
+            defaults.set(newValue, forKey: Settings.LAST_WALLPAPER_ALCHEMY_ROTATION)
+        }
+    }
+
+    /// 全局壁纸频道：必应时为所选地区（nil 表示自动），否则为来源保留码。
+    var globalChannelCode: String? {
+        switch wallpaperSource {
+        case .bing:
+            return bingMarketCode
+        case .wallpaperAlchemy:
+            return WallpaperChannel.wallpaperAlchemyCode
+        }
+    }
+
     /// 手动浏览是否同时切换所有已连接屏幕；默认开启，与自动更新范围独立保存。
     var switchesAllDisplaysTogether: Bool {
         get { defaults.object(forKey: Settings.SWITCHES_ALL_DISPLAYS_TOGETHER) as? Bool ?? true }
         set { defaults.set(newValue, forKey: Settings.SWITCHES_ALL_DISPLAYS_TOGETHER) }
+    }
+
+    /// 全局来源或必应地区改变时调用：解除全局固定，并让原本只是跟随旧全局频道、未固定图片的屏幕改回继承，
+    /// 使这些屏幕立即切到新来源；明确固定了图片或选了其他来源的屏幕保持不变。
+    /// - Parameter previousChannelCode: 改变前的全局频道。
+    func releaseSelections(followingPreviousGlobalChannel previousChannelCode: String?) {
+        pinnedWallpaperID = nil
+        wallpaperDisplayProfiles = wallpaperDisplayProfiles.filter { _, profile in
+            profile.pinMode == .pinned ||
+                profile.effectiveMarketCode(globalMarketCode: previousChannelCode) != previousChannelCode
+        }
     }
 
     /// 共享浏览时解除在线屏幕的独立地区及固定状态，离线屏幕配置保留。
@@ -306,10 +488,12 @@ public class Settings {
         }
     }
 
-    var requiredBingMarketCodes: [String?] {
-        var result = [bingMarketCode]
+    /// 需要下载的全部频道：全局频道加上各显示器单独指定的频道，去重后返回。
+    var requiredChannelCodes: [String?] {
+        let globalChannelCode = globalChannelCode
+        var result = [globalChannelCode]
         for profile in wallpaperDisplayProfiles.values where profile.marketMode != .inherit {
-            let marketCode = profile.effectiveMarketCode(globalMarketCode: bingMarketCode)
+            let marketCode = profile.effectiveMarketCode(globalMarketCode: globalChannelCode)
             if result.contains(where: { $0 == marketCode }) == false {
                 result.append(marketCode)
             }
@@ -393,6 +577,11 @@ public class Settings {
     private static let IMAGE_DOWNLOAD_PATH = "IMAGE_DOWNLOAD_PATH"
     private static let IMAGE_DOWNLOAD_PATH_BOOKMARK = "IMAGE_DOWNLOAD_PATH_BOOKMARK"
     private static let BING_MARKET_CODE = "BING_MARKET_CODE"
+    private static let WALLPAPER_SOURCE = "WALLPAPER_SOURCE"
+    private static let WALLPAPER_ALCHEMY_CATEGORY = "WALLPAPER_ALCHEMY_CATEGORY"
+    private static let WALLPAPER_ALCHEMY_REFRESH_INTERVAL = "WALLPAPER_ALCHEMY_REFRESH_INTERVAL"
+    private static let WALLPAPER_ALCHEMY_ROTATION_POSITION = "WALLPAPER_ALCHEMY_ROTATION_POSITION"
+    private static let LAST_WALLPAPER_ALCHEMY_ROTATION = "LAST_WALLPAPER_ALCHEMY_ROTATION"
     /// 手动浏览切换范围的持久化键，缺省时切换所有在线屏幕。
     private static let SWITCHES_ALL_DISPLAYS_TOGETHER = "SWITCHES_ALL_DISPLAYS_TOGETHER"
     private static let WALLPAPER_DISPLAY_MODE = "WALLPAPER_DISPLAY_MODE"

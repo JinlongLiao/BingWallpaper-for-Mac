@@ -78,16 +78,31 @@ final class WallpaperManager {
     ) {
         var profiles = settings.wallpaperDisplayProfiles
         var profile = profiles[displayIdentifier] ?? WallpaperDisplayProfile()
-        if let marketCode = descriptor.marketCode {
-            profile.marketMode = .explicit
-            profile.marketCode = marketCode
-        } else {
-            profile.marketMode = .automatic
-            profile.marketCode = nil
+        let effectiveMarketCode = profile.effectiveMarketCode(
+            globalMarketCode: settings.globalChannelCode
+        )
+        // 浏览同一来源的图片不改动来源设置，屏幕仍跟随全局来源，之后切换来源能立即生效。
+        if pinWallpaper || descriptor.marketCode != effectiveMarketCode {
+            if let marketCode = descriptor.marketCode {
+                profile.marketMode = .explicit
+                profile.marketCode = marketCode
+            } else {
+                profile.marketMode = .automatic
+                profile.marketCode = nil
+            }
         }
-        profile.pinMode = pinWallpaper ? .pinned : .followLatest
-        profile.pinnedWallpaperID = pinWallpaper ? descriptor.wallpaperIdentifier : nil
-        profiles[displayIdentifier] = profile
+        if pinWallpaper {
+            profile.pinMode = .pinned
+            profile.pinnedWallpaperID = descriptor.wallpaperIdentifier
+        } else if profile.pinMode == .pinned || profile.marketMode != .inherit {
+            profile.pinMode = .followLatest
+            profile.pinnedWallpaperID = nil
+        }
+        if profile.isDefault {
+            profiles.removeValue(forKey: displayIdentifier)
+        } else {
+            profiles[displayIdentifier] = profile
+        }
         settings.wallpaperDisplayProfiles = profiles
         applyWallpaper(descriptor, toDisplayIdentifier: displayIdentifier)
     }
@@ -112,7 +127,7 @@ final class WallpaperManager {
         settings.wallpaperDisplayProfiles = profiles
 
         let effectiveMarketCode = profile.effectiveMarketCode(
-            globalMarketCode: settings.bingMarketCode
+            globalMarketCode: settings.globalChannelCode
         )
         guard let descriptor = Database.instance.allImageDescriptors()
             .filter({
@@ -135,7 +150,7 @@ final class WallpaperManager {
             let width = Int(screen.frame.width * screen.backingScaleFactor)
             let height = Int(screen.frame.height * screen.backingScaleFactor)
             let isMain = displayID(for: screen) == CGMainDisplayID()
-            let mainSuffix = isMain ? " — Main Display" : ""
+            let mainSuffix = isMain ? L(" — Main Display") : ""
             return WallpaperDisplayInfo(
                 identifier: identifier,
                 title: "\(screen.localizedName) (\(width)×\(height))\(mainSuffix)",
@@ -281,7 +296,7 @@ final class WallpaperManager {
         }
 
         let effectiveMarketCode = profile.effectiveMarketCode(
-            globalMarketCode: settings.bingMarketCode
+            globalMarketCode: settings.globalChannelCode
         )
         if profile.pinMode == .pinned {
             guard let pinnedWallpaperID = profile.pinnedWallpaperID else {

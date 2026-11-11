@@ -569,6 +569,56 @@ final class WallpaperDisplaySettingsTests: XCTestCase {
     }
 }
 
+final class WallpaperAlchemyRotationSettingsTests: XCTestCase {
+    func testWallpaperAlchemyRefreshIntervalDefaultsToOffAndPersists() {
+        withSettings { settings in
+            XCTAssertEqual(settings.wallpaperAlchemyRefreshInterval, .never)
+            XCTAssertNil(settings.wallpaperAlchemyRefreshInterval.timeInterval)
+
+            settings.wallpaperAlchemyRefreshInterval = .fiveMinutes
+            XCTAssertEqual(settings.wallpaperAlchemyRefreshInterval, .fiveMinutes)
+            XCTAssertEqual(settings.wallpaperAlchemyRefreshInterval.timeInterval, 300)
+            XCTAssertEqual(
+                WallpaperAlchemyRefreshInterval.allCases.compactMap(\.timeInterval),
+                [60, 300, 600, 3600, 7200]
+            )
+        }
+    }
+
+    func testChangingWallpaperAlchemyCategoryRestartsRotation() {
+        withSettings { settings in
+            settings.wallpaperAlchemyCategory = DownloadManager.WallpaperAlchemyCategory(
+                id: 7,
+                name: "landscape",
+                title: "风景"
+            )
+            settings.wallpaperAlchemyRotationPosition = 12
+
+            // 同一分类只是换了语言名称，继续当前进度。
+            settings.wallpaperAlchemyCategory = DownloadManager.WallpaperAlchemyCategory(
+                id: 7,
+                name: "landscape",
+                title: "Landscape"
+            )
+            XCTAssertEqual(settings.wallpaperAlchemyRotationPosition, 12)
+
+            settings.wallpaperAlchemyCategory = DownloadManager.WallpaperAlchemyCategory(
+                id: 9,
+                name: "cars",
+                title: nil
+            )
+            XCTAssertEqual(settings.wallpaperAlchemyRotationPosition, 0)
+        }
+    }
+
+    private func withSettings(_ operation: (Settings) -> Void) {
+        let suiteName = "BingWallpaperTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        operation(Settings(defaults: defaults))
+    }
+}
+
 final class UpdateStatusTests: XCTestCase {
     func testStatusMenuTitles() {
         let base = WallpaperUpdateStatus(
@@ -876,10 +926,10 @@ final class WallpaperDisplayProfileTests: XCTestCase {
                 )
             ]
 
-            XCTAssertEqual(settings.requiredBingMarketCodes.count, 3)
-            XCTAssertTrue(settings.requiredBingMarketCodes.contains { $0 == "en-US" })
-            XCTAssertTrue(settings.requiredBingMarketCodes.contains { $0 == "ja-JP" })
-            XCTAssertTrue(settings.requiredBingMarketCodes.contains { $0 == nil })
+            XCTAssertEqual(settings.requiredChannelCodes.count, 3)
+            XCTAssertTrue(settings.requiredChannelCodes.contains { $0 == "en-US" })
+            XCTAssertTrue(settings.requiredChannelCodes.contains { $0 == "ja-JP" })
+            XCTAssertTrue(settings.requiredChannelCodes.contains { $0 == nil })
         }
     }
 
@@ -904,5 +954,468 @@ final class WallpaperDisplayProfileTests: XCTestCase {
         let defaults = UserDefaults(suiteName: suiteName)!
         defer { defaults.removePersistentDomain(forName: suiteName) }
         operation(Settings(defaults: defaults))
+    }
+}
+
+final class WallpaperSourceSettingsTests: XCTestCase {
+    func testSourceDefaultsToBingAndSwitchesGlobalChannel() {
+        withSettings { settings in
+            settings.bingMarketCode = "ja-JP"
+            XCTAssertEqual(settings.wallpaperSource, .bing)
+            XCTAssertEqual(settings.globalChannelCode, "ja-JP")
+
+            settings.wallpaperSource = .wallpaperAlchemy
+            XCTAssertEqual(settings.globalChannelCode, WallpaperChannel.wallpaperAlchemyCode)
+            XCTAssertEqual(settings.requiredChannelCodes, [WallpaperChannel.wallpaperAlchemyCode])
+            // 切换来源不应丢失已选的必应地区。
+            XCTAssertEqual(settings.bingMarketCode, "ja-JP")
+        }
+    }
+
+    func testDisplayProfileCanUseWallpaperAlchemyWhileGlobalIsBing() {
+        withSettings { settings in
+            settings.bingMarketCode = "en-US"
+            settings.wallpaperDisplayProfiles = [
+                "display-a": WallpaperDisplayProfile(
+                    marketMode: .explicit,
+                    marketCode: WallpaperChannel.wallpaperAlchemyCode
+                )
+            ]
+
+            XCTAssertEqual(settings.requiredChannelCodes.count, 2)
+            XCTAssertTrue(settings.requiredChannelCodes.contains { $0 == "en-US" })
+            XCTAssertTrue(settings.requiredChannelCodes.contains {
+                $0 == WallpaperChannel.wallpaperAlchemyCode
+            })
+        }
+    }
+
+    func testWallpaperAlchemyCategoryIsOptionalAndClearable() {
+        withSettings { settings in
+            XCTAssertNil(settings.wallpaperAlchemyCategory)
+
+            let category = DownloadManager.WallpaperAlchemyCategory(id: 3, name: "landscape", title: "风景")
+            settings.wallpaperAlchemyCategory = category
+            XCTAssertEqual(settings.wallpaperAlchemyCategory, category)
+
+            settings.wallpaperAlchemyCategory = nil
+            XCTAssertNil(settings.wallpaperAlchemyCategory)
+        }
+    }
+
+    func testChannelCodeDoesNotCollideWithBingMarkets() {
+        XCTAssertFalse(BingMarketOption.supportedCodes.contains(WallpaperChannel.wallpaperAlchemyCode))
+        XCTAssertTrue(WallpaperChannel.isSupported(WallpaperChannel.wallpaperAlchemyCode))
+        XCTAssertFalse(WallpaperChannel.isSupported("../bad"))
+        XCTAssertEqual(WallpaperChannel.source(for: nil), .bing)
+        XCTAssertEqual(WallpaperChannel.source(for: "zh-CN"), .bing)
+        XCTAssertEqual(
+            WallpaperChannel.source(for: WallpaperChannel.wallpaperAlchemyCode),
+            .wallpaperAlchemy
+        )
+    }
+
+    private func withSettings(_ operation: (Settings) -> Void) {
+        let suiteName = "BingWallpaperTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        operation(Settings(defaults: defaults))
+    }
+}
+
+final class WallpaperAlchemyMetadataTests: XCTestCase {
+    func testListUrlRequestsMostDownloadedDesktopWallpapers() {
+        let url = DownloadManager.wallpaperAlchemyListUrl(numberOfImages: 8, locale: "zh-CN", page: 3)
+        let components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        let query = Dictionary(uniqueKeysWithValues: (components?.queryItems ?? []).map {
+            ($0.name, $0.value ?? "")
+        })
+
+        XCTAssertEqual(components?.host, "server.wallpaperalchemy.com")
+        XCTAssertEqual(components?.path, "/api/v1/wallpapers")
+        XCTAssertEqual(query["perPage"], "8")
+        XCTAssertEqual(query["device"], "desktop")
+        XCTAssertEqual(query["sort"], "downloads")
+        XCTAssertEqual(query["locale"], "zh-CN")
+        XCTAssertEqual(query["page"], "3")
+        XCTAssertNil(query["tag"])
+    }
+
+    func testListUrlFiltersByCategoryID() {
+        let url = DownloadManager.wallpaperAlchemyListUrl(numberOfImages: 8, locale: "en", page: 0, categoryID: 42)
+        let query = Dictionary(uniqueKeysWithValues: (URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []).map {
+            ($0.name, $0.value ?? "")
+        })
+        XCTAssertEqual(query["tag"], "42")
+        XCTAssertEqual(query["page"], "1")
+    }
+
+    func testRotationPositionWrapsWithinRankingPoolAndCategorySize() {
+        let poolSize = DownloadManager.wallpaperAlchemyRotationPoolSize
+        XCTAssertEqual(DownloadManager.wallpaperAlchemyRotationPosition(5), 5)
+        XCTAssertEqual(DownloadManager.wallpaperAlchemyRotationPosition(poolSize), 0)
+        XCTAssertEqual(DownloadManager.wallpaperAlchemyRotationPosition(poolSize + 3), 3)
+        XCTAssertEqual(DownloadManager.wallpaperAlchemyRotationPosition(7, totalItems: 5), 2)
+        XCTAssertEqual(DownloadManager.wallpaperAlchemyRotationPosition(7, totalItems: 0), 7)
+        XCTAssertEqual(DownloadManager.wallpaperAlchemyRotationPosition(-1), poolSize - 1)
+    }
+
+    func testSingleWallpaperUrlSelectsRankingPosition() {
+        let url = DownloadManager.wallpaperAlchemyListUrl(numberOfImages: 1, locale: "en", page: 13, categoryID: 42)
+        let query = Dictionary(
+            uniqueKeysWithValues: URLComponents(url: url, resolvingAgainstBaseURL: false)!
+                .queryItems!.map { ($0.name, $0.value ?? "") }
+        )
+        XCTAssertEqual(query["perPage"], "1")
+        XCTAssertEqual(query["page"], "13")
+        XCTAssertEqual(query["device"], "desktop")
+        XCTAssertEqual(query["sort"], "downloads")
+        XCTAssertEqual(query["tag"], "42")
+    }
+
+    func testCategoriesUrlRequestsDesktopCategoriesByDownloads() {
+        let url = DownloadManager.wallpaperAlchemyCategoriesUrl(locale: "zh-CN")
+        let components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        let query = Dictionary(uniqueKeysWithValues: (components?.queryItems ?? []).map {
+            ($0.name, $0.value ?? "")
+        })
+        XCTAssertEqual(components?.path, "/api/v1/tags")
+        XCTAssertEqual(query["sort"], "downloads")
+        XCTAssertEqual(query["perPage"], "1000")
+        XCTAssertEqual(query["device"], "desktop")
+        XCTAssertEqual(query["locale"], "zh-CN")
+    }
+
+    func testRotationPageCyclesThroughTopPagesAndCategorySize() {
+        XCTAssertEqual(DownloadManager.wallpaperAlchemyRotationPage(day: 0), 1)
+        XCTAssertEqual(DownloadManager.wallpaperAlchemyRotationPage(day: 9), 10)
+        XCTAssertEqual(DownloadManager.wallpaperAlchemyRotationPage(day: 10), 1)
+        XCTAssertEqual(DownloadManager.wallpaperAlchemyRotationPage(day: 7, totalPages: 3), 2)
+        XCTAssertEqual(DownloadManager.wallpaperAlchemyRotationPage(day: 7, totalPages: 0), 8)
+        XCTAssertEqual(DownloadManager.wallpaperAlchemyRotationPage(day: -1), 10)
+    }
+
+    func testRotationDayAdvancesOncePerLocalDay() {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "Asia/Shanghai")!
+        let morning = calendar.date(from: DateComponents(year: 2026, month: 11, day: 11, hour: 0, minute: 5))!
+        let night = calendar.date(from: DateComponents(year: 2026, month: 11, day: 11, hour: 23, minute: 55))!
+        let nextDay = calendar.date(byAdding: .day, value: 1, to: morning)!
+
+        let day = DownloadManager.wallpaperAlchemyRotationDay(for: morning, calendar: calendar)
+        XCTAssertEqual(DownloadManager.wallpaperAlchemyRotationDay(for: night, calendar: calendar), day)
+        XCTAssertEqual(DownloadManager.wallpaperAlchemyRotationDay(for: nextDay, calendar: calendar), day + 1)
+    }
+
+    func testCategoryDecodingAndDisplayTitleFallback() throws {
+        let json = """
+        {"success":true,"data":{"data":[{"id":3,"name":"landscape","title":"风景","imageUrl":"/a.webp"},{"id":4,"name":"minimal","title":" "}],"pageInfo":{"totalItems":2,"totalPages":1}}}
+        """
+        let categories = try JSONDecoder().decode(
+            DownloadManager.WallpaperAlchemyResponse<DownloadManager.WallpaperAlchemyCategory>.self,
+            from: Data(json.utf8)
+        ).data.data
+        XCTAssertEqual(categories.map(\.displayTitle), ["风景", "minimal"])
+    }
+
+    func testCategoryMatcherSupportsFuzzyAndPinyinSearch() {
+        typealias Category = DownloadManager.WallpaperAlchemyCategory
+        let categories = [
+            Category(id: 1, name: "anime", title: "动漫"),
+            Category(id: 2, name: "landscape", title: "风景"),
+            Category(id: 3, name: "natural-landscape", title: "自然风景"),
+            Category(id: 4, name: "cars", title: "汽车"),
+            Category(id: 5, name: "minimal", title: "Minimalist")
+        ]
+        let matcher = WallpaperAlchemyCategoryMatcher(categories: categories)
+        func ids(_ query: String) -> [Int] { matcher.matches(for: query).map(\.id) }
+
+        XCTAssertEqual(ids(""), [1, 2, 3, 4, 5])
+        XCTAssertEqual(ids("风景"), [2, 3])
+        XCTAssertEqual(ids("fengjing"), [2, 3])
+        XCTAssertEqual(ids("feng jing"), [2, 3])
+        XCTAssertEqual(ids("fj").first, 2)
+        XCTAssertEqual(ids("zrfj"), [3])
+        XCTAssertEqual(ids("LAND"), [2, 3])
+        XCTAssertEqual(ids("ｍｉｎｉ"), [5])
+        XCTAssertEqual(ids("mnmlst"), [5])
+        XCTAssertTrue(ids("qiche").contains(4))
+        XCTAssertEqual(ids("xyzxyz"), [])
+    }
+
+    func testChangingGlobalSourceReleasesDisplaysFollowingPreviousSource() throws {
+        let suiteName = "BingWallpaperTests.release.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let settings = Settings(defaults: defaults)
+        let alchemy = WallpaperChannel.wallpaperAlchemyCode
+        settings.pinnedWallpaperID = "global-pin"
+        settings.wallpaperDisplayProfiles = [
+            "browsed": WallpaperDisplayProfile(marketMode: .explicit, marketCode: alchemy, pinMode: .followLatest),
+            "pinned": WallpaperDisplayProfile(marketMode: .explicit, marketCode: alchemy, pinMode: .pinned, pinnedWallpaperID: "w"),
+            "bing": WallpaperDisplayProfile(marketMode: .explicit, marketCode: "ja-JP", pinMode: .followLatest)
+        ]
+
+        settings.releaseSelections(followingPreviousGlobalChannel: alchemy)
+
+        XCTAssertNil(settings.pinnedWallpaperID)
+        XCTAssertEqual(Set(settings.wallpaperDisplayProfiles.keys), ["pinned", "bing"])
+    }
+
+    func testAppLanguageResolvesSystemPreferenceWithEnglishFallback() {
+        XCTAssertEqual(AppLanguage.system.resolved(preferredLanguages: ["zh-Hans-CN"]), .chineseSimplified)
+        XCTAssertEqual(AppLanguage.system.resolved(preferredLanguages: ["zh-Hant-TW"]), .chineseSimplified)
+        XCTAssertEqual(AppLanguage.system.resolved(preferredLanguages: ["ja-JP", "en-US"]), .english)
+        XCTAssertEqual(AppLanguage.system.resolved(preferredLanguages: ["de-DE", "zh-Hans"]), .chineseSimplified)
+        XCTAssertEqual(AppLanguage.system.resolved(preferredLanguages: ["xx"]), .english)
+        XCTAssertEqual(AppLanguage.english.resolved(preferredLanguages: ["zh-Hans-CN"]), .english)
+        XCTAssertEqual(AppLanguage.chineseSimplified.resolved(preferredLanguages: ["en-US"]), .chineseSimplified)
+    }
+
+    func testWallpaperAlchemyLocaleFollowsInterfaceLanguage() throws {
+        let suiteName = "BingWallpaperTests.language.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let settings = Settings(defaults: defaults)
+
+        XCTAssertEqual(settings.appLanguage, .system)
+        settings.appLanguage = .chineseSimplified
+        XCTAssertEqual(settings.appLanguage, .chineseSimplified)
+        XCTAssertEqual(settings.wallpaperAlchemyLocale, "zh-CN")
+        settings.appLanguage = .english
+        XCTAssertEqual(settings.wallpaperAlchemyLocale, "en")
+    }
+
+    func testChineseTranslationsKeepFormatPlaceholders() {
+        let placeholder = try! NSRegularExpression(pattern: "%(\\d+\\$)?[@dlu]+")
+        func placeholders(_ text: String) -> [String] {
+            placeholder.matches(in: text, range: NSRange(text.startIndex..., in: text)).map {
+                (text as NSString).substring(with: $0.range)
+            }
+        }
+        for (key, value) in Localization.chineseSimplified {
+            XCTAssertEqual(placeholders(key), placeholders(value), key)
+        }
+        XCTAssertEqual(Localization.string("Switching Scope", language: .chineseSimplified), "切换范围")
+        XCTAssertEqual(Localization.string("Switching Scope", language: .english), "Switching Scope")
+        XCTAssertEqual(Localization.string("Untranslated text", language: .chineseSimplified), "Untranslated text")
+        XCTAssertEqual(L("Favorites (%d)", 3), "Favorites (3)")
+    }
+
+    func testDecodesApiResponse() throws {
+        let json = """
+        {"success":true,"data":{"data":[{"id":7552,"slug":"makima-4k","image":"/storage/wallpapers/7552/makima-4k.jpeg","cardImage":"/storage/wallpapers/7552/makima-4k-card.webp","type":"image","videoUrl":null,"width":3840,"height":2160,"author":1,"links":{},"storage":"vps","createdAt":"2026-11-09T18:31:22.000Z","updatedAt":"2026-11-09T18:31:22.000Z","name":"玛奇玛 4K 壁纸","description":"d","keywords":"k"}],"pageInfo":{"page":1}}}
+        """
+        let response = try JSONDecoder().decode(
+            DownloadManager.WallpaperAlchemyResponse<DownloadManager.WallpaperAlchemyEntry>.self,
+            from: Data(json.utf8)
+        )
+        XCTAssertEqual(response.data.data.first?.id, 7552)
+        XCTAssertEqual(response.data.data.first?.name, "玛奇玛 4K 壁纸")
+    }
+
+    func testValidatedMetadataBuildsUrlsDateAndDescription() throws {
+        let metadata = try ImageDescriptor.validatedMetadata(
+            from: makeEntry(),
+            locale: "zh-CN",
+            featuredAt: ISO8601DateFormatter().date(from: "2026-11-09T18:31:22Z")!,
+            timeZone: TimeZone(identifier: "Asia/Shanghai")!
+        )
+
+        XCTAssertEqual(
+            metadata.imageURL.absoluteString,
+            "https://server.wallpaperalchemy.com/storage/wallpapers/7552/makima-4k.jpeg"
+        )
+        XCTAssertEqual(
+            metadata.copyrightURL.absoluteString,
+            "https://www.wallpaperalchemy.com/zh-CN/wallpaper/makima-4k-7552"
+        )
+        // 展示日期取获取时间，18:31 UTC 在上海已是次日。
+        XCTAssertEqual(metadata.startDate, "20261110")
+        XCTAssertEqual(metadata.endDate, "20261110")
+
+        let info = WallpaperImageInfo(
+            description: metadata.descriptionString,
+            startDate: metadata.endDate,
+            marketCode: WallpaperChannel.wallpaperAlchemyCode
+        )
+        XCTAssertEqual(info.title, "玛奇玛 4K 壁纸")
+        XCTAssertEqual(info.copyright, "© Wallpaper Alchemy · 3840×2160")
+        XCTAssertEqual(info.source, "Wallpaper Alchemy")
+    }
+
+    func testEnglishDetailPageHasNoLocalePrefix() throws {
+        let metadata = try ImageDescriptor.validatedMetadata(from: makeEntry(), locale: "en")
+        XCTAssertEqual(
+            metadata.copyrightURL.absoluteString,
+            "https://www.wallpaperalchemy.com/wallpaper/makima-4k-7552"
+        )
+    }
+
+    func testRejectsUntrustedVideoAndPortraitEntries() {
+        XCTAssertThrowsError(try ImageDescriptor.validatedMetadata(
+            from: makeEntry(image: "https://example.com/storage/wallpapers/1/a.jpg"),
+            locale: "en"
+        ))
+        XCTAssertThrowsError(try ImageDescriptor.validatedMetadata(
+            from: makeEntry(image: "http://server.wallpaperalchemy.com/storage/wallpapers/1/a.jpg"),
+            locale: "en"
+        ))
+        XCTAssertThrowsError(try ImageDescriptor.validatedMetadata(
+            from: makeEntry(type: "video"),
+            locale: "en"
+        ))
+        XCTAssertThrowsError(try ImageDescriptor.validatedMetadata(
+            from: makeEntry(width: 2160, height: 3840),
+            locale: "en"
+        ))
+    }
+
+    func testIdentityAndFileNameUseWallpaperID() throws {
+        let metadata = try ImageDescriptor.validatedMetadata(from: makeEntry(), locale: "en")
+        let code = WallpaperChannel.wallpaperAlchemyCode
+
+        XCTAssertEqual(
+            ImageDescriptor.wallpaperIdentifier(
+                startDate: metadata.startDate,
+                marketCode: code,
+                imageURL: metadata.imageURL
+            ),
+            "wallpaperalchemy:7552"
+        )
+        XCTAssertEqual(
+            Image.fileName(
+                startDate: metadata.startDate,
+                marketCode: code,
+                imageIdentity: ImageDescriptor.imageIdentity(for: metadata.imageURL),
+                fileExtension: metadata.imageURL.pathExtension
+            ),
+            "wallpaperalchemy_7552.jpeg"
+        )
+        XCTAssertEqual(
+            Image.fileName(
+                startDate: metadata.startDate,
+                marketCode: code,
+                imageIdentity: "7552",
+                fileExtension: "exe"
+            ),
+            "wallpaperalchemy_7552.jpg"
+        )
+    }
+
+    private func makeEntry(
+        image: String = "/storage/wallpapers/7552/makima-4k.jpeg",
+        type: String = "image",
+        width: Int? = 3840,
+        height: Int? = 2160,
+        createdAt: String = "2026-11-09T18:31:22.000Z"
+    ) -> DownloadManager.WallpaperAlchemyEntry {
+        return DownloadManager.WallpaperAlchemyEntry(
+            id: 7552,
+            slug: "makima-4k",
+            image: image,
+            type: type,
+            width: width,
+            height: height,
+            createdAt: createdAt,
+            name: "玛奇玛 4K 壁纸"
+        )
+    }
+}
+
+@MainActor
+final class WallpaperAlchemyDatabaseTests: XCTestCase {
+    func testSameDayWallpapersAreStoredSeparatelyAndTopRankIsNewest() throws {
+        let database = Database(inMemory: true)
+        let update = try database.updateWallpaperAlchemyImageDescriptors(
+            from: [makeEntry(id: 12), makeEntry(id: 11), makeEntry(id: 10)],
+            locale: "en"
+        )
+
+        XCTAssertEqual(update.descriptors.count, 3)
+        XCTAssertEqual(
+            database.allImageDescriptors(marketCode: WallpaperChannel.wallpaperAlchemyCode)
+                .map(\.wallpaperIdentifier),
+            ["wallpaperalchemy:10", "wallpaperalchemy:11", "wallpaperalchemy:12"]
+        )
+        XCTAssertEqual(
+            database.allImageDescriptors().max()?.wallpaperIdentifier,
+            "wallpaperalchemy:12"
+        )
+        XCTAssertEqual(Set(update.descriptors.map(\.image.fileName)).count, 3)
+    }
+
+    func testRefreshReusesExistingWallpaperAlchemyDescriptor() throws {
+        let database = Database(inMemory: true)
+        _ = try database.updateWallpaperAlchemyImageDescriptors(from: [makeEntry(id: 10)], locale: "en")
+        let update = try database.updateWallpaperAlchemyImageDescriptors(
+            from: [makeEntry(id: 11), makeEntry(id: 10)],
+            locale: "en"
+        )
+
+        XCTAssertEqual(update.descriptors.count, 2)
+        XCTAssertEqual(database.allImageDescriptors().count, 2)
+    }
+
+    func testBingAndWallpaperAlchemyChannelsStaySeparate() throws {
+        let database = Database(inMemory: true)
+        _ = try database.updateImageDescriptors(from: [
+            DownloadManager.ImageEntry(
+                url: "/th?id=OHR.Example_1920x1080.jpg",
+                enddate: "20261110",
+                startdate: "20261109",
+                copyright: "Example (© Photographer)",
+                copyrightlink: "https://www.bing.com/search?q=example"
+            )
+        ], marketCode: "zh-CN")
+        _ = try database.updateWallpaperAlchemyImageDescriptors(from: [makeEntry(id: 10)], locale: "en")
+
+        XCTAssertEqual(database.allImageDescriptors(marketCode: "zh-CN").count, 1)
+        XCTAssertEqual(
+            database.allImageDescriptors(marketCode: WallpaperChannel.wallpaperAlchemyCode).count,
+            1
+        )
+    }
+
+    func testLaterRotationBecomesNewest() throws {
+        let database = Database(inMemory: true)
+        let firstDay = ISO8601DateFormatter().date(from: "2026-11-10T04:00:00Z")!
+        let secondDay = firstDay.addingTimeInterval(24 * 60 * 60)
+        _ = try database.updateWallpaperAlchemyImageDescriptors(
+            from: [makeEntry(id: 900), makeEntry(id: 800)],
+            locale: "en",
+            featuredAt: firstDay
+        )
+        _ = try database.updateWallpaperAlchemyImageDescriptors(
+            from: [makeEntry(id: 5), makeEntry(id: 6)],
+            locale: "en",
+            featuredAt: secondDay
+        )
+
+        XCTAssertEqual(
+            database.allImageDescriptors().map(\.wallpaperIdentifier),
+            ["wallpaperalchemy:800", "wallpaperalchemy:900", "wallpaperalchemy:6", "wallpaperalchemy:5"]
+        )
+    }
+
+    func testAllInvalidEntriesThrowNoValidMetadata() {
+        let database = Database(inMemory: true)
+        XCTAssertThrowsError(try database.updateWallpaperAlchemyImageDescriptors(
+            from: [makeEntry(id: 10, type: "video")],
+            locale: "en"
+        ))
+    }
+
+    private func makeEntry(id: Int, type: String = "image") -> DownloadManager.WallpaperAlchemyEntry {
+        return DownloadManager.WallpaperAlchemyEntry(
+            id: id,
+            slug: "wallpaper",
+            image: "/storage/wallpapers/\(id)/wallpaper.jpg",
+            type: type,
+            width: 3840,
+            height: 2160,
+            createdAt: "2026-11-09T06:00:00.000Z",
+            name: "Wallpaper \(id)"
+        )
     }
 }

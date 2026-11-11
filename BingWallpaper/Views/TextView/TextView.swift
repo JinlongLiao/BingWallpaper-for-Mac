@@ -47,7 +47,7 @@ class TextView: NSView {
 
         let configuration = NSImage.SymbolConfiguration(pointSize: 10, weight: .semibold)
         submenuIndicator.image = NSImage(systemSymbolName: "chevron.right",
-                                         accessibilityDescription: "Image actions")?
+                                         accessibilityDescription: L("Image actions"))?
             .withSymbolConfiguration(configuration)
         submenuIndicator.imageScaling = .scaleProportionallyDown
         submenuIndicator.contentTintColor = .tertiaryLabelColor

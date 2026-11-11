@@ -24,18 +24,31 @@ class Image {
         self.fileName = Self.fileName(
             startDate: descriptor.startDate,
             marketCode: descriptor.marketCode,
-            imageIdentity: descriptor.marketCode == nil
+            imageIdentity: ImageDescriptor.usesImageIdentity(marketCode: descriptor.marketCode)
                 ? ImageDescriptor.imageIdentity(for: descriptor.imageUrl)
-                : nil
+                : nil,
+            fileExtension: descriptor.imageUrl.pathExtension
         )
     }
+
+    /// Wallpaper Alchemy 保留原始图片格式，其余来源一律保存为 jpg。
+    static let supportedFileExtensions: Set<String> = ["jpg", "jpeg", "png", "heic", "webp"]
 
     static func fileName(
         startDate: String,
         marketCode: String?,
-        imageIdentity: String? = nil
+        imageIdentity: String? = nil,
+        fileExtension: String? = nil
     ) -> String {
         let safeDate = safeFileNameComponent(startDate, expectedDate: true)
+        if marketCode == WallpaperChannel.wallpaperAlchemyCode, let imageIdentity {
+            let safeIdentity = safeFileNameComponent(imageIdentity, expectedDate: false)
+            let normalizedExtension = fileExtension?.lowercased() ?? ""
+            let safeExtension = supportedFileExtensions.contains(normalizedExtension)
+                ? normalizedExtension
+                : "jpg"
+            return "\(WallpaperChannel.wallpaperAlchemyCode)_\(safeIdentity).\(safeExtension)"
+        }
         guard let marketCode else {
             guard let imageIdentity else { return legacyAutomaticFileName(startDate: startDate) }
             let safeIdentity = safeFileNameComponent(imageIdentity, expectedDate: false)

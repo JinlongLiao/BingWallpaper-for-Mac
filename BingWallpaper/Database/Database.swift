@@ -23,9 +23,9 @@ final class Database {
         var errorDescription: String? {
             switch self {
             case .noValidMetadata:
-                return "Bing returned no valid wallpaper metadata"
+                return L("The wallpaper source returned no valid wallpaper metadata")
             case .persistentStoreUnavailable(let message):
-                return "The wallpaper database is unavailable: \(message)"
+                return L("The wallpaper database is unavailable: %@", message)
             }
         }
     }
@@ -67,7 +67,8 @@ final class Database {
             NSSortDescriptor(key: "marketCode", ascending: true)
         ]
         
-        return try persistentContainer.viewContext.fetch(fetchRequest)
+        // Wallpaper Alchemy 同一天有多张图片，需按图片编号细排，存储层无法表达该规则。
+        return try persistentContainer.viewContext.fetch(fetchRequest).sorted()
     }
 
     private func fetchImageDescriptorsOrEmpty(
@@ -135,6 +136,57 @@ final class Database {
         from imageEntries: [DownloadManager.ImageEntry],
         marketCode: String?
     ) throws -> ImageDescriptorUpdate {
+        return try updateImageDescriptors(
+            from: Self.validMetadata(from: imageEntries) {
+                try ImageDescriptor.validatedMetadata(from: $0)
+            },
+            marketCode: marketCode
+        )
+    }
+
+    /// 保存 Wallpaper Alchemy 当天轮换到的壁纸元数据，列表顺序即排行名次。
+    /// - Parameters:
+    ///   - imageEntries: 接口返回的壁纸列表，按下载量从高到低排列。
+    ///   - locale: 请求所用的站点语言。
+    ///   - featuredAt: 本次获取列表的时间，决定展示日期。
+    @MainActor
+    func updateWallpaperAlchemyImageDescriptors(
+        from imageEntries: [DownloadManager.WallpaperAlchemyEntry],
+        locale: String,
+        featuredAt: Date = Date()
+    ) throws -> ImageDescriptorUpdate {
+        return try updateImageDescriptors(
+            from: Self.validMetadata(from: Array(imageEntries.enumerated())) {
+                try ImageDescriptor.validatedMetadata(
+                    from: $0.element,
+                    locale: locale,
+                    featuredAt: featuredAt,
+                    rank: $0.offset
+                )
+            },
+            marketCode: WallpaperChannel.wallpaperAlchemyCode
+        )
+    }
+
+    private static func validMetadata<Entry>(
+        from entries: [Entry],
+        validate: (Entry) throws -> ImageDescriptor.ValidatedMetadata
+    ) -> [ImageDescriptor.ValidatedMetadata] {
+        return entries.compactMap { entry in
+            do {
+                return try validate(entry)
+            } catch {
+                logger.error("Skipping invalid wallpaper metadata: \(error.localizedDescription, privacy: .public)")
+                return nil
+            }
+        }
+    }
+
+    @MainActor
+    func updateImageDescriptors(
+        from validatedMetadata: [ImageDescriptor.ValidatedMetadata],
+        marketCode: String?
+    ) throws -> ImageDescriptorUpdate {
         let managedContext = persistentContainer.viewContext
         var descriptorByIdentity = try fetchImageDescriptors(
             predicate: marketPredicate(marketCode)
@@ -151,16 +203,15 @@ final class Database {
         var validMetadataCount = 0
         var currentDescriptors = [ImageDescriptor]()
         
-        for image in imageEntries {
+        for metadata in validatedMetadata {
             do {
-                let metadata = try ImageDescriptor.validatedMetadata(from: image)
                 let archiveIdentity = ImageDescriptor.archiveIdentity(
                     startDate: metadata.startDate,
                     marketCode: marketCode,
                     imageURL: metadata.imageURL
                 )
                 if let existingDescriptor = descriptorByIdentity[archiveIdentity] {
-                    if try existingDescriptor.update(from: image) {
+                    if existingDescriptor.update(from: metadata) {
                         wallpaperIDsRequiringDownload.insert(existingDescriptor.wallpaperIdentifier)
                     }
                     if existingDescriptor.requiresImageDownload {
@@ -170,7 +221,7 @@ final class Database {
                     validMetadataCount += 1
                 } else {
                     let descriptor = try ImageDescriptor.instantiate(
-                        from: image,
+                        from: metadata,
                         marketCode: marketCode,
                         in: managedContext
                     )
@@ -179,7 +230,7 @@ final class Database {
                     validMetadataCount += 1
                 }
             } catch {
-                logger.error("Skipping invalid Bing wallpaper metadata: \(error.localizedDescription, privacy: .public)")
+                logger.error("Skipping wallpaper metadata that could not be stored: \(error.localizedDescription, privacy: .public)")
             }
         }
         
@@ -359,13 +410,13 @@ final class Database {
             if let replacementError = loadPersistentStores(into: replacementContainer) {
                 throw replacementError
             }
-            recoveryNotice = "The wallpaper database was damaged and has been rebuilt. A backup was saved at \(backupDirectory.path)."
+            recoveryNotice = L("The wallpaper database was damaged and has been rebuilt. A backup was saved at %@.", backupDirectory.path)
             logger.fault("Rebuilt the wallpaper database after moving the damaged store to \(backupDirectory.path, privacy: .public)")
             return replacementContainer
         } catch {
             let fallbackContainer = makePersistentContainer(inMemory: true)
             let fallbackError = loadPersistentStores(into: fallbackContainer)
-            recoveryNotice = "The wallpaper database could not be opened. BingWallpaper is using a temporary in-memory database for this session. \((fallbackError ?? error as NSError).localizedDescription)"
+            recoveryNotice = L("The wallpaper database could not be opened. BingWallpaper is using a temporary in-memory database for this session. %@", (fallbackError ?? error as NSError).localizedDescription)
             logger.fault("Falling back to an in-memory wallpaper database: \(error.localizedDescription, privacy: .public)")
             return fallbackContainer
         }

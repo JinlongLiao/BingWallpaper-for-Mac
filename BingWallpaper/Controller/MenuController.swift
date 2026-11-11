@@ -85,46 +85,46 @@ final class MenuController: NSObject {
         menu.addItem(NSMenuItem.separator())
 
         let activeDisplayItem = NSMenuItem(
-            title: "Display",
+            title: L("Display"),
             action: nil,
             keyEquivalent: ""
         )
         activeDisplayItem.tag = MenuController.ACTIVE_DISPLAY_TAG
         activeDisplayItem.image = NSImage(
             systemSymbolName: "display",
-            accessibilityDescription: "Current display"
+            accessibilityDescription: L("Current display")
         )
         activeDisplayItem.isEnabled = false
         menu.addItem(activeDisplayItem)
 
-        let switchingScopeItem = NSMenuItem(title: "切换范围", action: nil, keyEquivalent: "")
+        let switchingScopeItem = NSMenuItem(title: L("Switching Scope"), action: nil, keyEquivalent: "")
         switchingScopeItem.tag = MenuController.SWITCHING_SCOPE_TAG
         menu.addItem(switchingScopeItem)
 
-        let updateStatusItem = NSMenuItem(title: "Update Status", action: nil, keyEquivalent: "")
+        let updateStatusItem = NSMenuItem(title: L("Update Status"), action: nil, keyEquivalent: "")
         updateStatusItem.tag = MenuController.UPDATE_STATUS_TAG
         menu.addItem(updateStatusItem)
         
-        let refreshItem = NSMenuItem(title: "Refresh Images", action: #selector(refreshImages), keyEquivalent: "")
+        let refreshItem = NSMenuItem(title: L("Refresh Images"), action: #selector(refreshImages), keyEquivalent: "")
         refreshItem.target = self
         refreshItem.tag = MenuController.REFRESH_IMAGES_TAG
         menu.addItem(refreshItem)
 
-        let favoritesItem = NSMenuItem(title: "Favorites", action: nil, keyEquivalent: "")
+        let favoritesItem = NSMenuItem(title: L("Favorites"), action: nil, keyEquivalent: "")
         favoritesItem.tag = MenuController.FAVORITES_TAG
         menu.addItem(favoritesItem)
         
         menu.addItem(NSMenuItem.separator())
         
-        let appUpdateItem = NSMenuItem(title: "Check for app update", action: #selector(checkForAppUpdate), keyEquivalent: "")
+        let appUpdateItem = NSMenuItem(title: L("Check for app update"), action: #selector(checkForAppUpdate), keyEquivalent: "")
         appUpdateItem.target = self
         menu.addItem(appUpdateItem)
         
-        let settingsItem = NSMenuItem(title: "Settings", action: #selector(showSettingsWc), keyEquivalent: "")
+        let settingsItem = NSMenuItem(title: L("Settings"), action: #selector(showSettingsWc), keyEquivalent: "")
         settingsItem.target = self
         menu.addItem(settingsItem)
         
-        menu.addItem(NSMenuItem(title: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+        menu.addItem(NSMenuItem(title: L("Quit"), action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
         
         return menu
     }
@@ -254,9 +254,11 @@ final class MenuController: NSObject {
         guard let descriptor = descriptors[safe: selectedDescriptorIndex] else { return }
 
         let savePanel = NSSavePanel()
-        savePanel.title = "Save Wallpaper Copy"
+        savePanel.title = L("Save Wallpaper Copy")
         savePanel.nameFieldStringValue = descriptor.image.fileName
-        savePanel.allowedContentTypes = [.jpeg]
+        savePanel.allowedContentTypes = [
+            UTType(filenameExtension: descriptor.image.downloadPath.pathExtension) ?? .jpeg
+        ]
         savePanel.canCreateDirectories = true
         guard savePanel.runModal() == .OK, let destination = savePanel.url else { return }
 
@@ -272,7 +274,7 @@ final class MenuController: NSObject {
         } catch {
             let alert = NSAlert()
             alert.alertStyle = .warning
-            alert.messageText = "Couldn’t Save Wallpaper"
+            alert.messageText = L("Couldn’t Save Wallpaper")
             alert.informativeText = error.localizedDescription
             alert.runModal()
         }
@@ -309,22 +311,31 @@ final class MenuController: NSObject {
     private func updateWallpaperSwitchingScopeMenu() {
         guard let item = menu?.item(withTag: Self.SWITCHING_SCOPE_TAG) else { return }
         item.isHidden = WallpaperManager.connectedDisplays().count < 2
-        let scopeMenu = NSMenu(title: "切换范围")
-        for (title, allDisplays) in [("所有屏幕一起切换", true), ("仅当前屏幕", false)] {
+        let scopeMenu = NSMenu(title: L("Switching Scope"))
+        for (title, allDisplays) in [(L("Switch All Displays Together"), true), (L("Current Display Only"), false)] {
             let option = NSMenuItem(title: title, action: #selector(selectWallpaperSwitchingScope(_:)), keyEquivalent: "")
             option.target = self
             option.representedObject = allDisplays
             option.state = settings.switchesAllDisplaysTogether == allDisplays ? .on : .off
             scopeMenu.addItem(option)
         }
-        item.title = settings.switchesAllDisplaysTogether ? "切换范围：所有屏幕" : "切换范围：仅当前屏幕"
+        item.title = settings.switchesAllDisplaysTogether
+            ? L("Switching Scope: All Displays")
+            : L("Switching Scope: Current Display")
         item.submenu = scopeMenu
     }
 
-    /// 记住手动切换范围；更改范围本身不立即替换壁纸。
+    /// 记住手动切换范围；改为所有屏幕一起切换时，立即让在线屏幕恢复为同一张全局壁纸。
     @objc private func selectWallpaperSwitchingScope(_ sender: NSMenuItem) {
         guard let allDisplays = sender.representedObject as? Bool else { return }
+        let didChange = settings.switchesAllDisplaysTogether != allDisplays
         settings.switchesAllDisplaysTogether = allDisplays
+        if allDisplays, didChange {
+            let identifiers = Set(WallpaperManager.connectedDisplays().map(\.identifier))
+            settings.restoreSharedWallpaperSelection(forDisplayIdentifiers: identifiers)
+            WallpaperManager.shared.refreshWallpaper()
+            updateFavoriteMenus()
+        }
         updateWallpaperSwitchingScopeMenu()
     }
 
@@ -381,7 +392,7 @@ final class MenuController: NSObject {
             textView.copyrightLabel.stringValue = info.copyright
             textView.button.action = nil
             textView.button.target = nil
-            textView.button.toolTip = "Show image details and actions"
+            textView.button.toolTip = L("Show image details and actions")
             textItem.view = textView
             textItem.submenu = imageActionsMenu(for: descriptor)
             menu.insertItem(textItem, at: textItemIndex)
@@ -392,14 +403,17 @@ final class MenuController: NSObject {
     }
 
     private func imageActionsMenu(for descriptor: ImageDescriptor) -> NSMenu {
-        let menu = NSMenu(title: "Wallpaper Details")
+        let menu = NSMenu(title: L("Wallpaper Details"))
         let info = descriptor.imageInfo
-        addImageDetail(title: "Title: \(info.title)", fullText: info.title, to: menu)
-        addImageDetail(title: "Date: \(info.date)", fullText: info.date, to: menu)
-        addImageDetail(title: "Region: \(info.region)", fullText: info.region, to: menu)
+        addImageDetail(title: L("Title: %@", info.title), fullText: info.title, to: menu)
+        addImageDetail(title: L("Date: %@", info.date), fullText: info.date, to: menu)
+        addImageDetail(title: L("Source: %@", info.source), fullText: info.source, to: menu)
+        if WallpaperChannel.source(for: descriptor.marketCode) == .bing {
+            addImageDetail(title: L("Region: %@", info.region), fullText: info.region, to: menu)
+        }
         if info.copyright.isEmpty == false {
             addImageDetail(
-                title: "Copyright: \(info.copyright)",
+                title: L("Copyright: %@", info.copyright),
                 fullText: info.copyright,
                 to: menu
             )
@@ -408,7 +422,7 @@ final class MenuController: NSObject {
         menu.addItem(.separator())
         let isFavorite = settings.favoriteWallpaperIDs.contains(descriptor.wallpaperIdentifier)
         addImageAction(
-            title: isFavorite ? "Remove from Favorites" : "Add to Favorites",
+            title: isFavorite ? L("Remove from Favorites") : L("Add to Favorites"),
             selector: #selector(toggleFavorite(_:)),
             systemImageName: isFavorite ? "star.slash" : "star",
             to: menu
@@ -423,15 +437,15 @@ final class MenuController: NSObject {
         if activePinnedWallpaperID == descriptor.wallpaperIdentifier ||
             (activeDisplayIdentifier == nil &&
                 settings.pinnedWallpaperID == descriptor.wallpaperIdentifier) {
-            pinTitle = "Unpin Wallpaper"
+            pinTitle = L("Unpin Wallpaper")
             pinImageName = "pin.slash"
         } else if activeDisplayIdentifier != nil || settings.pinnedWallpaperID == nil {
             pinTitle = activeDisplayIdentifier == nil
-                ? "Pin This Wallpaper"
-                : "Pin This Wallpaper on This Display"
+                ? L("Pin This Wallpaper")
+                : L("Pin This Wallpaper on This Display")
             pinImageName = "pin"
         } else {
-            pinTitle = "Replace Pinned Wallpaper"
+            pinTitle = L("Replace Pinned Wallpaper")
             pinImageName = "pin.fill"
         }
         addImageAction(
@@ -442,9 +456,9 @@ final class MenuController: NSObject {
         )
 
         menu.addItem(.separator())
-        addImageAction(title: "Open Source on Bing", selector: #selector(openImageSource(_:)), to: menu)
-        addImageAction(title: "Show in Finder", selector: #selector(revealImageInFinder(_:)), to: menu)
-        addImageAction(title: "Save a Copy…", selector: #selector(saveImageCopy(_:)), to: menu)
+        addImageAction(title: L("Open Source on %@", info.source), selector: #selector(openImageSource(_:)), to: menu)
+        addImageAction(title: L("Show in Finder"), selector: #selector(revealImageInFinder(_:)), to: menu)
+        addImageAction(title: L("Save a Copy…"), selector: #selector(saveImageCopy(_:)), to: menu)
         return menu
     }
 
@@ -479,12 +493,12 @@ final class MenuController: NSObject {
         }
 
         guard let favoritesItem = menu.item(withTag: MenuController.FAVORITES_TAG) else { return }
-        let favoritesMenu = NSMenu(title: "Favorites")
+        let favoritesMenu = NSMenu(title: L("Favorites"))
         let favoriteDescriptors = settings.favoriteWallpaperIDs
             .compactMap { descriptorByID[$0] }
             .sorted(by: >)
         if favoriteDescriptors.isEmpty {
-            let emptyItem = NSMenuItem(title: "No Favorites", action: nil, keyEquivalent: "")
+            let emptyItem = NSMenuItem(title: L("No Favorites"), action: nil, keyEquivalent: "")
             emptyItem.isEnabled = false
             favoritesMenu.addItem(emptyItem)
         } else {
@@ -503,11 +517,11 @@ final class MenuController: NSObject {
             }
         }
         favoritesItem.title = favoriteDescriptors.isEmpty
-            ? "Favorites"
-            : "Favorites (\(favoriteDescriptors.count))"
+            ? L("Favorites")
+            : L("Favorites (%d)", favoriteDescriptors.count)
         favoritesItem.image = NSImage(
             systemSymbolName: favoriteDescriptors.isEmpty ? "star" : "star.fill",
-            accessibilityDescription: "Favorite wallpapers"
+            accessibilityDescription: L("Favorite wallpapers")
         )
         favoritesItem.submenu = favoritesMenu
     }
@@ -526,19 +540,19 @@ final class MenuController: NSObject {
 
         let detailsMenu = NSMenu()
         addStatusDetail(
-            title: "Last successful update: \(formattedDate(status.lastSuccessAt))",
+            title: L("Last successful update: %@", formattedDate(status.lastSuccessAt)),
             to: detailsMenu
         )
         if let lastAttemptAt = status.lastAttemptAt {
-            addStatusDetail(title: "Last attempt: \(formattedDate(lastAttemptAt))", to: detailsMenu)
+            addStatusDetail(title: L("Last attempt: %@", formattedDate(lastAttemptAt)), to: detailsMenu)
         }
         if let nextAttemptAt = status.nextAttemptAt {
-            let label = status.phase == .retrying ? "Next retry" : "Next update"
-            addStatusDetail(title: "\(label): \(formattedDate(nextAttemptAt))", to: detailsMenu)
+            let format = status.phase == .retrying ? "Next retry: %@" : "Next update: %@"
+            addStatusDetail(title: L(format, formattedDate(nextAttemptAt)), to: detailsMenu)
         }
         if let failure = status.failure {
             detailsMenu.addItem(.separator())
-            addStatusDetail(title: "Failed step: \(failure.stage.title)", to: detailsMenu)
+            addStatusDetail(title: L("Failed step: %@", failure.stage.title), to: detailsMenu)
             let message = failure.message.count > 120
                 ? String(failure.message.prefix(117)) + "…"
                 : failure.message
@@ -551,8 +565,8 @@ final class MenuController: NSObject {
 
         if let refreshItem = menu.item(withTag: MenuController.REFRESH_IMAGES_TAG) {
             refreshItem.title = status.phase == .retrying || status.phase == .failed
-                ? "Retry Now"
-                : "Refresh Images"
+                ? L("Retry Now")
+                : L("Refresh Images")
             refreshItem.isEnabled = status.phase != .updating
         }
     }
@@ -564,8 +578,12 @@ final class MenuController: NSObject {
     }
 
     private func formattedDate(_ date: Date?) -> String {
-        guard let date else { return "Never" }
-        return DateFormatter.localizedString(from: date, dateStyle: .short, timeStyle: .short)
+        guard let date else { return L("Never") }
+        let formatter = DateFormatter()
+        formatter.locale = Localization.locale
+        formatter.dateStyle = .short
+        formatter.timeStyle = .short
+        return formatter.string(from: date)
     }
 
     private func updateStatusImage(for phase: WallpaperUpdatePhase) -> NSImage? {
@@ -578,7 +596,7 @@ final class MenuController: NSObject {
         case .retrying, .failed:
             symbolName = "exclamationmark.triangle"
         }
-        return NSImage(systemSymbolName: symbolName, accessibilityDescription: "Wallpaper update status")
+        return NSImage(systemSymbolName: symbolName, accessibilityDescription: L("Wallpaper update status"))
     }
     
     @MainActor
@@ -590,7 +608,7 @@ final class MenuController: NSObject {
         }
         let pinnedWallpaperIsUnavailable = settings.pinnedWallpaperID != nil
             && pinnedDescriptor == nil
-        let visibleMarketCode = pinnedDescriptor?.marketCode ?? settings.bingMarketCode
+        let visibleMarketCode = pinnedDescriptor?.marketCode ?? settings.globalChannelCode
         self.descriptors = ImageDescriptor.distinctWallpaperDescriptors(
             from: downloadedDescriptors.filter { $0.marketCode == visibleMarketCode },
             preferredWallpaperID: pinnedDescriptor?.wallpaperIdentifier
@@ -641,7 +659,7 @@ final class MenuController: NSObject {
             forDisplayIdentifier: activeDisplayIdentifier
         )
         let effectiveMarketCode = profile.effectiveMarketCode(
-            globalMarketCode: settings.bingMarketCode
+            globalMarketCode: settings.globalChannelCode
         )
 
         let configuredWallpaperID: String?
@@ -677,11 +695,11 @@ final class MenuController: NSObject {
         if let displayItem = menu?.item(withTag: MenuController.ACTIVE_DISPLAY_TAG) {
             let title = WallpaperManager.displayInfo(
                 for: activeDisplayIdentifier
-            )?.title ?? "Current Display"
+            )?.title ?? L("Current Display")
             // 菜单保留简短名称，完整型号及分辨率通过悬停提示查看。
             let compactTitle = title.count > 30 ? String(title.prefix(27)) + "…" : title
-            displayItem.title = "Display: \(compactTitle)"
-            displayItem.toolTip = "\(title)\nUse the switching scope menu to choose all displays or this display."
+            displayItem.title = L("Display: %@", compactTitle)
+            displayItem.toolTip = L("%@\nUse the switching scope menu to choose all displays or this display.", title)
         }
     }
 }
@@ -725,6 +743,10 @@ extension MenuController: SettingsVcDelegate {
         showNewestImage()
     }
 
+    func wallpaperSourceDidChange() {
+        showNewestImage()
+    }
+
     func wallpaperDisplaySelectionDidChange() {
         WallpaperManager.shared.refreshWallpaper()
     }
@@ -734,6 +756,17 @@ extension MenuController: SettingsVcDelegate {
     }
 
     func wallpaperDatabaseDidReset() {
+        showNewestImage()
+    }
+
+    /// 界面语言变化后重建菜单，使固定菜单项也换成新语言。
+    func appLanguageDidChange() {
+        if let statusItem {
+            menu?.removeAllItems()
+            menu = createMenu()
+            statusItem.menu = menu
+            updateStatusMenu()
+        }
         showNewestImage()
     }
 

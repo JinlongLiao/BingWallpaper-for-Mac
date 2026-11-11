@@ -8,12 +8,13 @@ struct WallpaperImageInfo: Equatable {
     let copyright: String
     let date: String
     let region: String
+    let source: String
 
     init(
         description: String,
         startDate: String,
         marketCode: String?,
-        locale: Locale = .current,
+        locale: Locale = Localization.locale,
         timeZone: TimeZone = .current
     ) {
         let components = Self.descriptionComponents(from: description)
@@ -24,7 +25,8 @@ struct WallpaperImageInfo: Equatable {
             locale: locale,
             timeZone: timeZone
         )
-        region = Self.regionTitle(for: marketCode, locale: locale)
+        region = WallpaperChannel.title(for: marketCode, locale: locale)
+        source = WallpaperChannel.source(for: marketCode).title
     }
 
     private static func descriptionComponents(from description: String) -> (title: String, copyright: String) {
@@ -65,11 +67,6 @@ struct WallpaperImageInfo: Equatable {
         return formatter.string(from: parsedDate)
     }
 
-    private static func regionTitle(for marketCode: String?, locale: Locale) -> String {
-        guard let marketCode else { return BingMarketOption.automatic.title }
-        let localizedName = locale.localizedString(forIdentifier: marketCode) ?? marketCode
-        return "\(localizedName) (\(marketCode))"
-    }
 }
 
 public final class ImageDescriptor: NSManagedObject {
@@ -78,6 +75,8 @@ public final class ImageDescriptor: NSManagedObject {
         case invalidEndDate(String)
         case invalidImageURL(String)
         case invalidCopyrightURL(String)
+        case unsupportedMediaType(String)
+        case unsupportedOrientation
         case missingEntity
 
         var errorDescription: String? {
@@ -90,6 +89,10 @@ public final class ImageDescriptor: NSManagedObject {
                 return "Invalid Bing image URL: \(value)"
             case .invalidCopyrightURL(let value):
                 return "Invalid Bing copyright URL: \(value)"
+            case .unsupportedMediaType(let value):
+                return "Unsupported Wallpaper Alchemy media type: \(value)"
+            case .unsupportedOrientation:
+                return "Wallpaper Alchemy image is not a landscape desktop wallpaper"
             case .missingEntity:
                 return "The wallpaper database model is missing ImageDescriptor"
             }
@@ -100,7 +103,10 @@ public final class ImageDescriptor: NSManagedObject {
         let startDate: String
         let endDate: String
         let imageURL: URL
+        let descriptionString: String
         let copyrightURL: URL
+        /// 本次出现在列表中的时间；Wallpaper Alchemy 用它记录排行名次，nil 表示当前时间。
+        var seenAt: Date? = nil
     }
 
     @NSManaged var startDate: String
@@ -170,6 +176,10 @@ public final class ImageDescriptor: NSManagedObject {
         marketCode: String?,
         imageURL: URL? = nil
     ) -> String {
+        // Wallpaper Alchemy 同一天会上传多张图片，标识只取图片编号，与日期无关。
+        if marketCode == WallpaperChannel.wallpaperAlchemyCode, let imageURL {
+            return "\(WallpaperChannel.wallpaperAlchemyCode):\(imageIdentity(for: imageURL))"
+        }
         guard marketCode == nil, let imageURL else {
             return "\(marketCode ?? "automatic"):\(startDate)"
         }
@@ -188,6 +198,9 @@ public final class ImageDescriptor: NSManagedObject {
         if let identity = safeIdentityComponent(bingImageID), identity.isEmpty == false {
             return identity
         }
+        if let wallpaperAlchemyID = wallpaperAlchemyID(for: imageURL) {
+            return String(wallpaperAlchemyID)
+        }
 
         let digest = SHA256.hash(data: Data(imageURL.absoluteString.utf8))
         return digest.map { String(format: "%02x", $0) }.joined()
@@ -200,21 +213,46 @@ public final class ImageDescriptor: NSManagedObject {
         return String(String.UnicodeScalarView(scalars).prefix(120))
     }
 
+    /// 是否需要用图片自身的标识区分同一天的多张图片（必应自动地区及 Wallpaper Alchemy）。
+    static func usesImageIdentity(marketCode: String?) -> Bool {
+        return marketCode == nil || marketCode == WallpaperChannel.wallpaperAlchemyCode
+    }
+
+    /// 从 `/storage/wallpapers/{id}/文件名` 形式的 Wallpaper Alchemy 地址中取出图片编号。
+    static func wallpaperAlchemyID(for imageURL: URL) -> Int? {
+        guard isTrustedWallpaperAlchemyImageURL(imageURL) else { return nil }
+        let components = imageURL.pathComponents
+        guard let index = components.firstIndex(of: "wallpapers"),
+              index > 0,
+              components[index - 1] == "storage",
+              components.indices.contains(index + 2),
+              let id = Int(components[index + 1]),
+              id > 0 else {
+            return nil
+        }
+        return id
+    }
+
     static func archiveIdentity(startDate: String, marketCode: String?, imageURL: URL) -> String {
+        if marketCode == WallpaperChannel.wallpaperAlchemyCode {
+            return imageIdentity(for: imageURL)
+        }
         guard marketCode == nil else { return startDate }
         return "\(startDate):\(imageIdentity(for: imageURL))"
     }
     
     static func == (lhs: ImageDescriptor, rhs: ImageDescriptor) -> Bool {
+        if lhs.marketCode == WallpaperChannel.wallpaperAlchemyCode {
+            return lhs.wallpaperIdentifier == rhs.wallpaperIdentifier
+        }
         return lhs.startDate == rhs.startDate && lhs.marketCode == rhs.marketCode
     }
     
     static func instantiate(
-        from entry: DownloadManager.ImageEntry,
+        from metadata: ValidatedMetadata,
         marketCode: String?,
         in managedContext: NSManagedObjectContext
     ) throws -> ImageDescriptor {
-        let metadata = try validatedMetadata(from: entry)
         guard let entity = NSEntityDescription.entity(
             forEntityName: "ImageDescriptor",
             in: managedContext
@@ -225,17 +263,16 @@ public final class ImageDescriptor: NSManagedObject {
         imageDescriptor.startDate = metadata.startDate
         imageDescriptor.endDate = metadata.endDate
         imageDescriptor.imageUrl = metadata.imageURL
-        imageDescriptor.descriptionString = entry.copyright
+        imageDescriptor.descriptionString = metadata.descriptionString
         imageDescriptor.copyrightUrl = metadata.copyrightURL
         imageDescriptor.marketCode = marketCode
         imageDescriptor.requiresImageDownload = true
-        imageDescriptor.lastSeenAt = Date()
+        imageDescriptor.lastSeenAt = metadata.seenAt ?? Date()
         return imageDescriptor
     }
 
     @discardableResult
-    func update(from entry: DownloadManager.ImageEntry) throws -> Bool {
-        let metadata = try Self.validatedMetadata(from: entry)
+    func update(from metadata: ValidatedMetadata) -> Bool {
         let imageChanged = Self.metadataRequiresImageRefresh(
             currentImageURL: imageUrl,
             newImageURL: metadata.imageURL
@@ -243,12 +280,12 @@ public final class ImageDescriptor: NSManagedObject {
         startDate = metadata.startDate
         endDate = metadata.endDate
         imageUrl = metadata.imageURL
-        descriptionString = entry.copyright
+        descriptionString = metadata.descriptionString
         copyrightUrl = metadata.copyrightURL
         if imageChanged {
             requiresImageDownload = true
         }
-        lastSeenAt = Date()
+        lastSeenAt = metadata.seenAt ?? Date()
         return imageChanged
     }
 
@@ -279,8 +316,87 @@ public final class ImageDescriptor: NSManagedObject {
             startDate: entry.startdate,
             endDate: entry.enddate,
             imageURL: imageURL,
+            descriptionString: entry.copyright,
             copyrightURL: copyrightURL
         )
+    }
+
+    /// 校验 Wallpaper Alchemy 条目并转换为与必应一致的元数据。
+    /// 排行图片的上传时间与展示无关，日期取被选为壁纸的当天，名次记录在 `seenAt` 中。
+    /// - Parameters:
+    ///   - entry: 接口返回的单张壁纸。
+    ///   - locale: 请求时使用的站点语言，用于生成详情页地址。
+    ///   - featuredAt: 本次获取列表的时间。
+    ///   - rank: 在本次列表中的名次，从 0 开始，名次越靠前越新。
+    ///   - timeZone: 换算本地日期所用的时区。
+    static func validatedMetadata(
+        from entry: DownloadManager.WallpaperAlchemyEntry,
+        locale: String,
+        featuredAt: Date = Date(),
+        rank: Int = 0,
+        timeZone: TimeZone = .current
+    ) throws -> ValidatedMetadata {
+        guard entry.type == "image" else {
+            throw ValidationError.unsupportedMediaType(entry.type)
+        }
+        if let width = entry.width, let height = entry.height, width < height {
+            throw ValidationError.unsupportedOrientation
+        }
+        let date = wallpaperAlchemyDateString(from: featuredAt, timeZone: timeZone)
+
+        // 接口返回站内相对路径，也可能返回对象存储上的绝对地址。
+        guard let imageURL = URL(
+            string: entry.image,
+            relativeTo: DownloadManager.wallpaperAlchemyApiBaseUrl
+        )?.absoluteURL,
+              isTrustedWallpaperAlchemyImageURL(imageURL) else {
+            throw ValidationError.invalidImageURL(entry.image)
+        }
+
+        var detailComponents = URLComponents(
+            url: DownloadManager.wallpaperAlchemySiteBaseUrl,
+            resolvingAgainstBaseURL: false
+        )!
+        let localePrefix = locale == "en" ? "" : "/\(locale)"
+        detailComponents.path = "\(localePrefix)/wallpaper/\(entry.slug)-\(entry.id)"
+        guard let copyrightURL = detailComponents.url else {
+            throw ValidationError.invalidCopyrightURL(entry.slug)
+        }
+
+        let trimmedName = entry.name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let title = trimmedName.isEmpty ? entry.slug : trimmedName
+        var credit = "© \(WallpaperSource.wallpaperAlchemy.title)"
+        if let width = entry.width, let height = entry.height, width > 0, height > 0 {
+            credit += " · \(width)×\(height)"
+        }
+
+        return ValidatedMetadata(
+            startDate: date,
+            endDate: date,
+            imageURL: imageURL,
+            // 沿用必应"标题 (版权)"格式，菜单可直接拆出标题和版权行。
+            descriptionString: "\(title) (\(credit))",
+            copyrightURL: copyrightURL,
+            seenAt: featuredAt.addingTimeInterval(-Double(max(0, rank)) / 1000)
+        )
+    }
+
+    static func wallpaperAlchemyDateString(from date: Date, timeZone: TimeZone) -> String {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = timeZone
+        formatter.dateFormat = "yyyyMMdd"
+        return formatter.string(from: date)
+    }
+
+    static func isTrustedWallpaperAlchemyImageURL(_ url: URL) -> Bool {
+        guard url.scheme?.lowercased() == "https",
+              let host = url.host?.lowercased() else {
+            return false
+        }
+        return host == "server.wallpaperalchemy.com"
+            || host == "wallpaperalchemy-bucket.s3.eu-north-1.amazonaws.com"
     }
 
     static func isValidBingDate(_ value: String) -> Bool {
@@ -319,10 +435,23 @@ extension ImageDescriptor: Comparable {
         if lhs.startDate != rhs.startDate {
             return lhs.startDate < rhs.startDate
         }
+        // 同一天的 Wallpaper Alchemy 图片按最近一次获取时的排行名次排序，名次越靠前越新；
+        // 时间相同时再按站内编号兜底，保证排序稳定。
+        if lhs.marketCode == WallpaperChannel.wallpaperAlchemyCode,
+           rhs.marketCode == WallpaperChannel.wallpaperAlchemyCode {
+            if lhs.lastSeenAt != rhs.lastSeenAt {
+                return (lhs.lastSeenAt ?? .distantPast) < (rhs.lastSeenAt ?? .distantPast)
+            }
+            if let lhsID = wallpaperAlchemyID(for: lhs.imageUrl),
+               let rhsID = wallpaperAlchemyID(for: rhs.imageUrl),
+               lhsID != rhsID {
+                return lhsID < rhsID
+            }
+        }
         if lhs.lastSeenAt != rhs.lastSeenAt {
             return (lhs.lastSeenAt ?? .distantPast) < (rhs.lastSeenAt ?? .distantPast)
         }
-        if lhs.marketCode == nil, rhs.marketCode == nil {
+        if lhs.marketCode == rhs.marketCode, usesImageIdentity(marketCode: lhs.marketCode) {
             return Self.imageIdentity(for: lhs.imageUrl) < Self.imageIdentity(for: rhs.imageUrl)
         }
         return (lhs.marketCode ?? "") < (rhs.marketCode ?? "")
